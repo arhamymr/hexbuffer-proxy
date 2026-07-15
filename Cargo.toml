@@ -9,3 +9,4 @@ tokio-rustls = "0.26" # Raw async TLS streams
 rustls-pki-types = "1.0"
 rcgen = "0.13" # Generates dummy site certs on the fly
 anyhow = "1.0"
+base64 = "0.22"

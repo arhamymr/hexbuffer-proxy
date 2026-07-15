@@ -2,7 +2,7 @@
 mod ca;
 
 use std::sync::Arc;
-use ca::CertificateAuthority;
+use ca::CertificationAuthority;
 
 // tokio
 use tokio::net::{TcpListener, TcpStream};
@@ -17,7 +17,7 @@ async fn main() -> anyhow::Result<()> {
     let _ = default_provider().install_default();
 
     let listener = TcpListener::bind("127.0.0.1:8080").await?;
-    let ca = Arc::new(CertificateAuthority::new());
+    let ca = Arc::new(CertificationAuthority::new());
 
     println!("Listening on 127.0.0.1:8080");
 
@@ -34,7 +34,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 
-async fn handle_client(mut client_stream: TcpStream, ca: Arc<CertificateAuthority>) -> anyhow::Result<()> {
+async fn handle_client(mut client_stream: TcpStream, ca: Arc<CertificationAuthority>) -> anyhow::Result<()> {
 
     // 1. Read the initial Request header 
     let mut buffer = [0;4096];
@@ -96,7 +96,7 @@ async fn handle_client(mut client_stream: TcpStream, ca: Arc<CertificateAuthorit
         tls_client_stream.flush().await?;
 
     } else {
-        eprintln!("Non-HTTPS request received");
+        // eprintln!("Non-HTTPS request received");
     }
 
 
