@@ -1,4 +1,4 @@
-.PHONY: run build release check clean watch fmt lint
+.PHONY: run build release check clean watch fmt lint test
 
 run:
 	cargo run
@@ -23,3 +23,6 @@ fmt:
 
 lint:
 	cargo clippy -- -D warnings
+
+test:
+	cargo test

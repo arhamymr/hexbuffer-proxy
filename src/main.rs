@@ -46,12 +46,11 @@ async fn handle_client(mut client_stream: TcpStream, ca: Arc<CertificateAuthorit
     if request_str.starts_with("CONNECT") {
 
         // Extract host (e.g. example.com:443)
-        let first_line = request_str.lines().next().unwrap_or("");
-        let parts: Vec<&str> = first_line.split_whitespace().collect();
-        // example.com:443
-        let target_address = parts.get(1).unwrap_or(&"");
+        let Some(target_address) = parse_connect_target(&request_str) else {
+            anyhow::bail!("failed to parse CONNECT target");
+        };
         // example.com
-        let target_hosts  = target_address.split(':').next().unwrap_or(target_address);
+        let target_hosts = target_address.split(':').next().unwrap_or(target_address);
         // tell the browser 
         client_stream.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").await?;
 
@@ -102,4 +101,39 @@ async fn handle_client(mut client_stream: TcpStream, ca: Arc<CertificateAuthorit
 
 
     Ok(())
+}
+
+/// Extracts the target host:port from a CONNECT request line.
+/// Returns `Some("example.com:443")` for `"CONNECT example.com:443 HTTP/1.1"`.
+fn parse_connect_target(request: &str) -> Option<&str> {
+    let first_line = request.lines().next().unwrap_or("");
+    let parts: Vec<&str> = first_line.split_whitespace().collect();
+    parts.get(1).copied()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_connect_target() {
+        let req = "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        assert_eq!(parse_connect_target(req), Some("example.com:443"));
+    }
+
+    #[test]
+    fn test_parse_connect_target_no_port() {
+        let req = "CONNECT example.com HTTP/1.1\r\n\r\n";
+        assert_eq!(parse_connect_target(req), Some("example.com"));
+    }
+
+    #[test]
+    fn test_parse_connect_target_missing_field() {
+        assert_eq!(parse_connect_target("CONNECT \r\n\r\n"), None);
+    }
+
+    #[test]
+    fn test_parse_connect_target_empty() {
+        assert_eq!(parse_connect_target(""), None);
+    }
 }
