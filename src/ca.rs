@@ -55,3 +55,38 @@ impl CertificateAuthority {
         (cert_der, private_key_der)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ca_creation() {
+        let ca = CertificateAuthority::new();
+        assert!(ca.ca_cert.der().len() > 0);
+    }
+
+    #[test]
+    fn test_forge_certificate_returns_valid_data() {
+        let ca = CertificateAuthority::new();
+        let (cert_der, key_der) = ca.forge_certificate("example.com");
+        assert!(!cert_der.is_empty(), "cert DER should not be empty");
+        assert!(!key_der.is_empty(), "key DER should not be empty");
+    }
+
+    #[test]
+    fn test_forge_certificate_caching() {
+        let ca = CertificateAuthority::new();
+        let (cert1, _) = ca.forge_certificate("example.com");
+        let (cert2, _) = ca.forge_certificate("example.com");
+        assert_eq!(cert1, cert2, "same host should return cached cert");
+    }
+
+    #[test]
+    fn test_forge_different_hosts() {
+        let ca = CertificateAuthority::new();
+        let (cert1, _) = ca.forge_certificate("example.com");
+        let (cert2, _) = ca.forge_certificate("other.org");
+        assert_ne!(cert1, cert2, "different hosts should produce different certs");
+    }
+}
