@@ -1,14 +1,26 @@
-use rcgen::{BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType, IsCa, KeyPair, SanType};
+use rcgen::{
+    BasicConstraints, 
+    Certificate, 
+    CertificateParams, 
+    DistinguishedName, 
+    DnType, 
+    IsCa, 
+    KeyPair, 
+    SanType
+};
 
 use std::collections::HashMap;
 use std::sync::{Mutex};
 use std::io::Write;
+use std::io::Read;
 use std::fs::File;
+use std::path::Path;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 
 pub struct CertificationAuthority {
+    ca_params: CertificateParams,
     ca_cert: Certificate,
     ca_key: KeyPair,
     cert_cache: Mutex<HashMap<String, (Vec<u8>, Vec<u8>)>>,
@@ -16,26 +28,54 @@ pub struct CertificationAuthority {
 
 impl CertificationAuthority {
     pub fn new() -> Self {
+        // Check certificate on disk
+        let cert_path = "ca.pem";
+        let key_path = "ca.key.der";
+
         let  mut params = CertificateParams::default();
         params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-
         let mut dn = DistinguishedName::new();
         dn.push(DnType::CommonName, "Hexbuffer Proxy CA");
-
         params.distinguished_name = dn;
 
+
+        // Cek certificate on disk
+        if Path::new(key_path).exists() {
+            println!("CA private key found on disk, loading...");
+
+            //1. Read string private key from file
+            let mut key_file = File::open(key_path).expect("Failed to open private key file");
+            let mut key_der = String::new();
+            key_file.read_to_string(&mut key_der).unwrap();
+
+            // 2. Reconstruct keypair from the DER bytes 
+            let ca_key = KeyPair::from_pem(&key_der).unwrap();
+
+            // self sign it again to pupulate the certificate object 
+            let ca_cert = params.self_signed(&ca_key).unwrap();
+            return Self {
+                ca_params: params,
+                ca_cert,
+                ca_key,
+                cert_cache: Mutex::new(HashMap::new()),
+            }
+        }
+
+        println!("Generating new CA certificate...");
 
         let ca_key = KeyPair::generate().unwrap();
         let ca_cert = params.self_signed(&ca_key).unwrap();
 
         let ca = Self {
+            ca_params: params.clone(),
             ca_cert,
             ca_key,
             cert_cache: Mutex::new(HashMap::new()),
         };
 
 
-        ca.save_ca_to_pem("ca.pem").expect("Failed to save CA certificate");
+        ca.save_ca_to_pem(cert_path).expect("Failed to save CA certificate");
+        ca.save_key_to_pem(key_path).expect("Failed to save CA key");
         ca
     }
 
@@ -71,6 +111,18 @@ impl CertificationAuthority {
         Ok(())
     }
 
+    pub fn save_key_to_pem(&self, check_path: &str) -> std::io::Result<()> {
+        // 1. Get the raw DER bytes of the key 
+        let key_pem = self.ca_key.serialize_pem();
+
+        // 4. Save to disk
+        let mut file = File::create(check_path)?;
+        file.write_all(key_pem.as_bytes())?;
+
+        println!("CA key saved to {}", check_path);
+
+        Ok(())
+    }
 
     pub fn forge_certificate(&self, host: &str) -> (Vec<u8>, Vec<u8>) {
         let mut cache = self.cert_cache.lock().unwrap();
@@ -88,7 +140,10 @@ impl CertificationAuthority {
         params.subject_alt_names.push(SanType::DnsName(host.to_string().try_into().unwrap()));
 
         let site_key = KeyPair::generate().unwrap();
-        let site_cert = params.signed_by(&site_key, &self.ca_cert, &self.ca_key).unwrap();
+
+        let issuer = rcgen::Issuer::new(self.ca_params.clone(), &self.ca_key);
+
+        let site_cert = params.signed_by(&site_key, &issuer).unwrap();
 
         let cert_der = site_cert.der().to_vec();
         let private_key_der = site_key.serialized_der().to_vec();
