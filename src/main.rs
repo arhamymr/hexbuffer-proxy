@@ -76,13 +76,22 @@ async fn handle_client(mut client_stream: TcpStream, ca: Arc<CertificationAuthor
         let mut inner_buf = [0; 16384]; // 16KB
 
         let bytes_read = tls_client_stream.read(&mut inner_buf).await?;
-        let inner_request = String::from_utf8_lossy(&inner_buf[..bytes_read]);
+        let inner_request = String::from_utf8_lossy(&inner_buf[..bytes_read]).into_owned();
 
 
         // Hook intercept : add your own logic here to modify the inner request
         println!("Inner Request: {}", inner_request);
 
-        let modified_request = inner_request.replace("User-Agent: ", "User-Agent: Hexbuffer Proxy");
+        // Force Connection: close so read_to_end doesn't hang on HTTP/1.1 keep-alive
+        let modified_request = inner_request
+            .replace("Connection: keep-alive", "Connection: close")
+            .replace("Connection: Keep-Alive", "Connection: close");
+        
+        let modified_request = if !modified_request.contains("Connection: close") {
+            modified_request.replacen("\r\n\r\n", "\r\nConnection: close\r\n\r\n", 1)
+        } else {
+            modified_request
+        };
 
         // 6. Connect to target server via TLS 
         let server_stream = TcpStream::connect(target_address).await?;
@@ -101,15 +110,9 @@ async fn handle_client(mut client_stream: TcpStream, ca: Arc<CertificationAuthor
 
         server_stream.write_all(modified_request.as_bytes()).await?;
 
-        // 7. Read full response from server 
-        let mut response_data =  Vec::new();
-
-        server_stream.read_to_end(&mut response_data).await?;
-        // Hook response : add your own logic here to modify the response
-        println!("Response : {} data", response_data.len());
-
-        tls_client_stream.write_all(&response_data).await?;
-        tls_client_stream.flush().await?;
+        // 7. Stream response from server to client
+        let bytes_copied = tokio::io::copy(&mut server_stream, &mut tls_client_stream).await?;
+        println!("Response: {} bytes copied", bytes_copied);
 
     } else {
         // eprintln!("Non-HTTPS request received");
