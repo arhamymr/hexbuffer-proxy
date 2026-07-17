@@ -9,6 +9,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::rustls::{ServerConfig, crypto::aws_lc_rs::default_provider};
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio_rustls::TlsAcceptor;
+use tokio_rustls::TlsConnector;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 
@@ -37,9 +38,10 @@ async fn main() -> anyhow::Result<()> {
 async fn handle_client(mut client_stream: TcpStream, ca: Arc<CertificationAuthority>) -> anyhow::Result<()> {
 
     // 1. Read the initial Request header 
-    let mut buffer = [0;4096];
+    let mut buffer = vec![0;4096];
     let n = client_stream.read(&mut buffer).await?;
-    let request_str = String::from_utf8_lossy(&buffer[..n]);
+    buffer.truncate(n);
+    let request_str = String::from_utf8(buffer)?;
 
 
     // 2. Lifecycle check: identify if it is an HTTPS tunnel setup
@@ -50,12 +52,13 @@ async fn handle_client(mut client_stream: TcpStream, ca: Arc<CertificationAuthor
             anyhow::bail!("failed to parse CONNECT target");
         };
         // example.com
-        let target_hosts = target_address.split(':').next().unwrap_or(target_address);
+        let target_address = target_address.to_string();
+        let target_hosts = target_address.split(':').next().unwrap_or(&target_address).to_string();
         // tell the browser 
         client_stream.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").await?;
 
         // 3. Forge Certificate for this domain on the fly 
-        let (cert_der, key_der) = ca.forge_certificate(target_hosts);
+        let (cert_der, key_der) = ca.forge_certificate(&target_hosts);
 
         
         // 4. Client handshake: Spin up a local TLS server config just for this stream
@@ -70,7 +73,7 @@ async fn handle_client(mut client_stream: TcpStream, ca: Arc<CertificationAuthor
         let mut tls_client_stream = acceptor.accept(client_stream).await?;
 
         // 5. Read the true inner decrypted payload
-        let mut inner_buf = [0; 2048];
+        let mut inner_buf = [0; 16384]; // 16KB
 
         let bytes_read = tls_client_stream.read(&mut inner_buf).await?;
         let inner_request = String::from_utf8_lossy(&inner_buf[..bytes_read]);
@@ -81,18 +84,31 @@ async fn handle_client(mut client_stream: TcpStream, ca: Arc<CertificationAuthor
 
         let modified_request = inner_request.replace("User-Agent: ", "User-Agent: Hexbuffer Proxy");
 
-        // 6. Connect to target server 
-        let mut server_stream = TcpStream::connect(target_address).await?;
+        // 6. Connect to target server via TLS 
+        let server_stream = TcpStream::connect(target_address).await?;
+
+        let root_store = tokio_rustls::rustls::RootCertStore {
+            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+        };
+        
+        let tls_config = tokio_rustls::rustls::ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
+
+        let connector = TlsConnector::from(Arc::new(tls_config));
+        let domain = target_hosts.try_into().unwrap_or_else(|_| "localhost".try_into().unwrap());
+        let mut server_stream = connector.connect(domain, server_stream).await?;
+
         server_stream.write_all(modified_request.as_bytes()).await?;
 
-        // 7. Read the response Payload from the actual web server
-        let mut resp_buf = [0; 4096];
-        let resp_bytes = server_stream.read(&mut resp_buf).await?;
+        // 7. Read full response from server 
+        let mut response_data =  Vec::new();
 
+        server_stream.read_to_end(&mut response_data).await?;
         // Hook response : add your own logic here to modify the response
-        println!("Response : {}", resp_bytes);
+        println!("Response : {} data", response_data.len());
 
-        tls_client_stream.write_all(&resp_buf[..resp_bytes]).await?;
+        tls_client_stream.write_all(&response_data).await?;
         tls_client_stream.flush().await?;
 
     } else {

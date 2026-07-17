@@ -6,7 +6,9 @@ use rcgen::{
     DnType, 
     IsCa, 
     KeyPair, 
-    SanType
+    SanType,
+    ExtendedKeyUsagePurpose,
+    KeyUsagePurpose,
 };
 
 use std::collections::HashMap;
@@ -29,11 +31,12 @@ pub struct CertificationAuthority {
 impl CertificationAuthority {
     pub fn new() -> Self {
         // Check certificate on disk
-        let cert_path = "ca.pem";
-        let key_path = "ca.key.der";
+        let cert_path = "cert/ca.pem";
+        let key_path = "cert/ca-key.pem";
 
         let  mut params = CertificateParams::default();
         params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params.key_usages = vec![KeyUsagePurpose::KeyCertSign];
         let mut dn = DistinguishedName::new();
         dn.push(DnType::CommonName, "Hexbuffer Proxy CA");
         params.distinguished_name = dn;
@@ -133,6 +136,12 @@ impl CertificationAuthority {
 
         let mut params = CertificateParams::default();
         params.is_ca = IsCa::NoCa;
+
+        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        params.key_usages = vec![
+            KeyUsagePurpose::DigitalSignature,
+            KeyUsagePurpose::KeyEncipherment,
+        ];
 
         let mut dn = DistinguishedName::new();
         dn.push(DnType::CommonName, host);
