@@ -75,11 +75,9 @@ Preferences → Privacy & Security → Certificates → View Certificates → Au
 ## Current Implementation State
 
 - ✅ HTTPS MITM interception via CONNECT tunneling
-- ✅ Dynamic TLS certificate generation per domain (rcgen)
-- ✅ CA certificate persistence and cache (in-memory)
-- ✅ Request interception with `println!` hook point ready for custom logic
-- ✅ `Connection: close` forced to prevent hanging on HTTP/1.1 keep-alive
-- ✅ Unit tests for CA module and CONNECT parser
+- ✅ Dynamic TLS certificate generation per domain
+- ✅ CA certificate persistence and caching
+- ✅ Unit test coverage for core modules
 
 ## Future Planning
 
