@@ -54,10 +54,13 @@ The proxy listens on `127.0.0.1:8080`. Configure your browser or system to use i
 
 ```
 src/
-├── main.rs    # Entry point — binds TCP listener, spawns client handlers
+├── main.rs    # Entry point — one-liner via ProxyBuilder
 ├── ca.rs      # Certificate authority — generates CA & per-domain TLS certs (rcgen)
-├── proxy.rs   # CONNECT tunnel handling — TLS interception & request forwarding
-└── parser.rs  # CONNECT request line parser — extracts host:port
+├── proxy.rs   # CONNECT tunnel handling — TLS interception + handler pipeline
+├── parser.rs  # CONNECT request line parser — extracts host:port
+├── handler.rs # HttpHandler trait, Body, HttpContext, RequestOrResponse, NoopHandler
+├── builder.rs # ProxyBuilder — ergonomic proxy configuration
+└── error.rs   # Centralized ProxyError enum (thiserror)
 ```
 
 ## Trusting the CA Certificate

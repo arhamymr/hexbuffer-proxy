@@ -76,6 +76,8 @@ impl CertificationAuthority {
             cert_cache: Mutex::new(HashMap::new()),
         };
 
+        // ensure cert directory exists before saving
+        std::fs::create_dir_all("cert").expect("Failed to create cert directory");
 
         ca.save_ca_to_pem(cert_path).expect("Failed to save CA certificate");
         ca.save_key_to_pem(key_path).expect("Failed to save CA key");

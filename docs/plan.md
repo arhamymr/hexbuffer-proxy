@@ -265,45 +265,45 @@ Feature-gated behind `http2`. When enabled:
 
 ---
 
-## Implementation Phases
+## Backlog
 
-### Phase 1: Foundation (Refactor existing code)
-- [ ] Create `error.rs` — centralized `Error` enum using `thiserror`
-- [ ] Create `handler.rs` — define `HttpHandler`, `WebSocketHandler` traits + `NoopHandler`
-- [ ] Create `body.rs` — `Body` type (wrapper around `hyper::body::Body`)
-- [ ] Extract `https_proxy.rs` from `proxy.rs` — clean separation of HTTPS MITM logic
-- [ ] Add `hyper` dependency for HTTP types and parsing
+| ID | Task | Priority | Est. | Dependencies |
+|----|------|----------|------|--------------|
+| **BK-01** | Add `hyper`, `http`, `thiserror` dependencies to `Cargo.toml` | P0 | S | — |
+| **BK-02** | Create `error.rs` — centralized `Error` enum | P0 | S | BK-01 |
+| **BK-03** | Create `handler.rs` — `HttpHandler` / `WebSocketHandler` traits + `NoopHandler` | P0 | M | — |
+| **BK-04** | Create `body.rs` — `Body` type wrapping `hyper::body::Body` | P0 | S | BK-01 |
+| **BK-05** | Extract `https_proxy.rs` from `proxy.rs` — clean HTTPS MITM module | P0 | M | — |
+| **BK-06** | Create `http_proxy.rs` — plain HTTP forwarding with handler hooks | P1 | L | BK-03 |
+| **BK-07** | Support streaming bodies and chunked transfer encoding | P1 | M | BK-06 |
+| **BK-08** | Integrate `HttpHandler` calls into `http_proxy.rs` and `https_proxy.rs` | P1 | M | BK-03, BK-05, BK-06 |
+| **BK-09** | Implement handler stack (chain of responsibility) | P1 | S | BK-08 |
+| **BK-10** | Support short-circuit responses via `RequestOrResponse` | P1 | S | BK-09 |
+| **BK-11** | Create `builder.rs` — `ProxyBuilder` struct with configuration methods | P2 | M | BK-08 |
+| **BK-12** | `Proxy::start()` — bind and run accept loop delegating to proxy modules | P2 | M | BK-11 |
+| **BK-13** | Refactor `main.rs` to use `ProxyBuilder` | P2 | S | BK-12 |
+| **BK-14** | Add `tokio-tungstenite` dependency | P2 | S | — |
+| **BK-15** | Create `ws_proxy.rs` — WebSocket upgrade detection and frame relay | P2 | L | BK-03, BK-14 |
+| **BK-16** | Integrate `WebSocketHandler` trait calls in `ws_proxy.rs` | P2 | M | BK-15 |
+| **BK-17** | Implement `decode_request` / `decode_response` behind `decoder` feature gate | P3 | M | BK-04 |
+| **BK-18** | Enable `hyper/http2` feature + ALPN negotiation | P3 | L | BK-12 |
 
-### Phase 2: HTTP Proxy
-- [ ] Create `http_proxy.rs` — plain HTTP forwarding with handler hooks
-- [ ] Handle GET, POST, PUT, DELETE, etc. (all methods)
-- [ ] Handle streaming bodies (chunked transfer)
-- [ ] Handle `Host` header resolution for upstream connection
+### Priority Legend
 
-### Phase 3: Handler Integration
-- [ ] Integrate `HttpHandler` calls into both `http_proxy.rs` and `https_proxy.rs`
-- [ ] Implement handler stack (chain of responsibility pattern)
-- [ ] Support short-circuit responses via `RequestOrResponse`
+| Priority | Meaning |
+|----------|---------|
+| P0 | Blocking — must ship first (foundation) |
+| P1 | Core — HTTP proxy + handler integration |
+| P2 | Extension — builder pattern + WebSocket |
+| P3 | Optional — body decoding + HTTP/2 |
 
-### Phase 4: ProxyBuilder
-- [ ] Create `builder.rs` with `ProxyBuilder` struct
-- [ ] `build()` method to produce `Proxy` struct
-- [ ] `Proxy::start()` to bind and run accept loop
-- [ ] Refactor `main.rs` to use builder pattern
+### Size Legend
 
-### Phase 5: WebSocket
-- [ ] Add `tokio-tungstenite` dependency
-- [ ] Create `ws_proxy.rs` — WebSocket upgrade detection and frame relay
-- [ ] Integrate `WebSocketHandler` trait calls
-
-### Phase 6: Body Decoding
-- [ ] Implement `decode_request` / `decode_response` behind `decoder` feature gate
-- [ ] Support gzip, deflate, brotli, zstd
-
-### Phase 7: HTTP/2 (Optional)
-- [ ] Enable `hyper/http2` feature
-- [ ] Add ALPN negotiation in TLS layer
-- [ ] Test transparent handler operation over HTTP/2
+| Size | Meaning |
+|------|---------|
+| S | Small — single file, few types |
+| M | Medium — multi-file refactor or new module with logic |
+| L | Large — new protocol support or complex module |
 
 ---
 
