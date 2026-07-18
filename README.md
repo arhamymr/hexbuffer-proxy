@@ -79,17 +79,18 @@ Preferences → Privacy & Security → Certificates → View Certificates → Au
 
 - ✅ HTTPS MITM interception via CONNECT tunneling
 - ✅ Dynamic TLS certificate generation per domain
-- ✅ CA certificate persistence and caching
-- ✅ Unit test coverage for core modules
+- ✅ CA certificate persistence, caching, and auto-creation
+- ✅ **Trait-based `HttpHandler` system** — intercept and modify requests/responses
+- ✅ **`ProxyBuilder`** — ergonomic one-liner proxy configuration
+- ✅ **Handler pipeline** — parse → handler stack → serialize integrated into proxy flow
+- ✅ **Short-circuit support** — return responses without contacting upstream
+- ✅ Unit test coverage for builder, handler stack, and core modules
 
 ## Future Planning
 
-See [docs/feature-spec-mitm-proxy.md](docs/feature-spec-mitm-proxy.md) for the full roadmap. Planned features:
+See [docs/plan.md](docs/plan.md) for the full roadmap. Planned features:
 
 - **Plain HTTP proxying** — forward non-CONNECT requests with handler hooks
-- **Response modification** — intercept and modify upstream responses before returning to client
-- **Trait-based handler system** — `HttpHandler` / `WebSocketHandler` traits for composable interception logic
-- **ProxyBuilder** — ergonomic builder pattern for proxy configuration
 - **WebSocket support** — intercept and relay WebSocket frames with message modification
 - **HTTP/2 support** — optional feature-gated HTTP/2 proxying
 - **Body decoding helpers** — decode gzip/deflate/brotli/zstd compressed bodies
@@ -103,4 +104,7 @@ See [docs/feature-spec-mitm-proxy.md](docs/feature-spec-mitm-proxy.md) for the f
 | `tokio-rustls` / `rustls` | TLS client/server handshakes |
 | `rcgen` | CA and per-domain certificate generation |
 | `webpki-roots` | Trusted root CA store for upstream connections |
-| `base64` | PEM certificate encoding |
+| `hyper` / `http` | HTTP types and parsing |
+| `async-trait` | Async trait dynamic dispatch |
+| `thiserror` | Ergonomic error types |
+| `bytes` | Zero-copy byte buffers |
