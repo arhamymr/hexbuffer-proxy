@@ -1,13 +1,12 @@
 use crate::ca::CertificationAuthority;
-use crate::parser::parse_connect_request;
-use crate::handler::{HttpHandler, HttpContext, RequestOrResponse, Body, WebSocketHandler};
+use crate::handler::{HttpHandler, Body, WebSocketHandler};
 
 // std
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 
 // tokio
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::net::TcpStream;
 
 // http
@@ -37,110 +36,37 @@ pub(crate) async fn handle_client(
 
     // 2. Lifecycle check: identify if it is an HTTPS tunnel setup
     if request_str.starts_with("CONNECT") {
-        let Some(target) = parse_connect_request(&request_str) else {
-            anyhow::bail!("failed to parse CONNECT target");
+        // Extract host:port from CONNECT line, default port 443 if unspecified.
+        let target = request_str
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .ok_or_else(|| anyhow::anyhow!(
+                "malformed CONNECT request: missing target host"
+            ))?;
+
+        // Ensure port is present — CONNECT always implies HTTPS (port 443).
+        let target = if target.contains(':') {
+            target.to_string()
+        } else {
+            format!("{target}:443")
         };
 
         return crate::https_proxy::handle_https(
-            client_stream, ca, handler, ws_handler, target, client_addr, buf_size,
+            client_stream, ca, handler, ws_handler, &target, client_addr, buf_size,
         ).await;
 
-    } else {
-        // ── Plain HTTP (non-CONNECT) ─────────────────────────
-        let request_bytes = request_str.as_bytes();
-        let request = parse_raw_request(request_bytes)?;
-
-        // Resolve target from Host header or absolute URI
-        let host = extract_host(&request, &request_str)?;
-
-        // Handler: request
-        let req_id = REQUEST_ID.fetch_add(1, Ordering::SeqCst);
-        let mut ctx = HttpContext {
-            id: req_id,
-            host: host.clone(),
-            client_addr,
-            is_https: false,
-        };
-
-        let is_ws = crate::ws_proxy::is_websocket_upgrade(&request);
-
-        match handler.handle_request(&mut ctx, request).await? {
-            RequestOrResponse::Response(res) => {
-                // Short-circuit — respond without contacting upstream
-                let res_bytes = serialize_response(&res);
-                client_stream.write_all(&res_bytes).await?;
-                client_stream.shutdown().await?;
-                return Ok(());
-            }
-            RequestOrResponse::Request(req) => {
-                if is_ws {
-                    // ── WebSocket: raw TCP relay ──────────────
-                    let bytes = serialize_request(&req);
-                    let target = if host.contains(':') {
-                        host.clone()
-                    } else {
-                        format!("{}:80", host)
-                    };
-                    let mut server_stream = TcpStream::connect(&target).await?;
-                    server_stream.write_all(&bytes).await?;
-
-                    let full_response = read_full_response(&mut server_stream, buf_size).await?;
-                    let response = parse_raw_response(&full_response)?;
-                    let modified_response = handler.handle_response(&mut ctx, response).await?;
-                    let final_bytes = serialize_response(&modified_response);
-
-                    client_stream.write_all(&final_bytes).await?;
-                    if crate::ws_proxy::is_websocket_response(&modified_response) {
-                        if let Some(ws) = ws_handler {
-                            crate::ws_proxy::relay_framed(
-                                client_stream, server_stream, ws, &mut ctx,
-                            ).await?;
-                        } else {
-                            crate::ws_proxy::relay_websocket(
-                                &mut client_stream, &mut server_stream,
-                            ).await?;
-                        }
-                    } else {
-                        client_stream.shutdown().await?;
-                    }
-                } else {
-                    // ── Normal HTTP: Hyper client ─────────────
-                    // (connection pooling, HTTP/2, transparent decompression)
-                    let response = crate::upstream::send_request(req).await?;
-                    let modified_response = handler.handle_response(&mut ctx, response).await?;
-                    let final_bytes = serialize_response(&modified_response);
-
-                    client_stream.write_all(&final_bytes).await?;
-                    client_stream.shutdown().await?;
-                }
-            }
-        }
     }
 
-    Ok(())
+    // Plain HTTP — delegate
+    crate::http_proxy::handle_http(
+        client_stream, handler, ws_handler, client_addr, buf_size, request_str,
+    ).await
 }
 
 
 // ── HTTP parse / serialize helpers ────────────────────────────────
 
-/// Extract target host from Host header or absolute URI.
-fn extract_host(req: &Request<Body>, raw: &str) -> anyhow::Result<String> {
-    // 1. Try Host header
-    if let Some(host) = req.headers().get("host").and_then(|v| v.to_str().ok()) {
-        return Ok(host.to_string());
-    }
-
-    // 2. Fallback: absolute URI (e.g. proxy requests like GET http://example.com/)
-    if let Some(uri) = raw.lines().next().and_then(|l| l.split_whitespace().nth(1)) {
-        for prefix in &["http://", "https://"] {
-            if let Some(rest) = uri.strip_prefix(prefix) {
-                return Ok(rest.split('/').next().unwrap_or(rest).to_string());
-            }
-        }
-    }
-
-    anyhow::bail!("could not determine target host — missing Host header");
-}
 
 pub(crate) fn parse_raw_request(raw: &[u8]) -> anyhow::Result<Request<Body>> {
     let text = String::from_utf8_lossy(raw);
@@ -238,27 +164,7 @@ pub(crate) fn serialize_response(res: &Response<Body>) -> Vec<u8> {
     out
 }
 
-#[allow(dead_code)]
-pub(crate) fn force_connection_close_bytes(raw: &[u8]) -> Vec<u8> {
-    let modified = String::from_utf8_lossy(raw)
-        .replace("keep-alive", "close")
-        .replace("Keep-Alive", "close");
 
-    if modified.contains("Connection: close") {
-        modified.into_bytes()
-    } else {
-        let mut out = Vec::with_capacity(raw.len() + 24);
-        // insert Connection: close before the final \r\n\r\n
-        if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
-            out.extend_from_slice(&raw[..pos]);
-            out.extend_from_slice(b"\r\nConnection: close");
-            out.extend_from_slice(&raw[pos..]);
-        } else {
-            out.extend_from_slice(raw);
-        }
-        out
-    }
-}
 
 // ── Response body reader ──────────────────────────────────────────
 
@@ -302,8 +208,10 @@ pub(crate) async fn read_full_response<R: AsyncRead + Unpin>(
 fn is_chunked(headers: &str) -> bool {
     headers
         .lines()
-        .any(|l| l.to_lowercase().starts_with("transfer-encoding:")
-             && l.contains("chunked"))
+        .any(|l| {
+            let lower = l.to_lowercase();
+            lower.starts_with("transfer-encoding:") && lower.contains("chunked")
+        })
 }
 
 fn get_content_length(headers: &str) -> Option<usize> {
@@ -432,4 +340,208 @@ async fn read_until_close<R: AsyncRead + Unpin>(
     }
 
     Ok(buf)
+}
+
+
+// ── Tests ──────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http::{Request, Response};
+    use crate::handler::Body;
+    use bytes::Bytes;
+
+    // ── parse_raw_request ──────────────────────────────────────
+
+    #[test]
+    fn test_parse_raw_request_basic_get() {
+        let raw = b"GET /index.html HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let req = parse_raw_request(raw).unwrap();
+        assert_eq!(req.method(), "GET");
+        assert_eq!(req.uri().path(), "/index.html");
+        assert_eq!(
+            req.headers().get("host").unwrap(),
+            "example.com"
+        );
+    }
+
+    #[test]
+    fn test_parse_raw_request_with_headers() {
+        let raw = b"POST /submit HTTP/1.1\r\nHost: example.com\r\nContent-Length: 11\r\nContent-Type: text/plain\r\n\r\n";
+        let req = parse_raw_request(raw).unwrap();
+        assert_eq!(req.method(), "POST");
+        assert_eq!(req.uri().path(), "/submit");
+        assert_eq!(req.headers().len(), 3);
+        assert_eq!(
+            req.headers().get("content-length").unwrap(),
+            "11"
+        );
+        assert_eq!(
+            req.headers().get("content-type").unwrap(),
+            "text/plain"
+        );
+    }
+
+    #[test]
+    fn test_parse_raw_request_trims_header_values() {
+        let raw = b"GET / HTTP/1.1\r\nX-Custom:   padded value  \r\n\r\n";
+        let req = parse_raw_request(raw).unwrap();
+        assert_eq!(
+            req.headers().get("x-custom").unwrap(),
+            "padded value"
+        );
+    }
+
+    // ── serialize_request ──────────────────────────────────────
+
+    #[test]
+    fn test_serialize_request_roundtrip() {
+        let raw = b"GET /api/data HTTP/1.1\r\nhost: example.com\r\naccept: application/json\r\n\r\n";
+        let req = parse_raw_request(raw).unwrap();
+        let serialized = serialize_request(&req);
+        let req2 = parse_raw_request(&serialized).unwrap();
+
+        assert_eq!(req2.method(), req.method());
+        assert_eq!(req2.uri().path(), req.uri().path());
+        assert_eq!(
+            req2.headers().get("host").unwrap(),
+            req.headers().get("host").unwrap()
+        );
+    }
+
+    #[test]
+    fn test_serialize_request_includes_body() {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/upload")
+            .header("content-type", "text/plain")
+            .body(Body::Full(Bytes::from("payload")))
+            .unwrap();
+
+        let serialized = serialize_request(&req);
+        let text = String::from_utf8_lossy(&serialized);
+
+        assert!(text.contains("POST /upload HTTP/1.1"));
+        assert!(text.contains("content-type: text/plain"));
+        assert!(text.ends_with("payload"));
+    }
+
+    // ── parse_raw_response ─────────────────────────────────────
+
+    #[test]
+    fn test_parse_raw_response_200_ok() {
+        let raw = b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 5\r\n\r\n";
+        let res = parse_raw_response(raw).unwrap();
+        assert_eq!(res.status().as_u16(), 200);
+        assert_eq!(
+            res.headers().get("content-type").unwrap(),
+            "text/html"
+        );
+        assert_eq!(
+            res.headers().get("content-length").unwrap(),
+            "5"
+        );
+    }
+
+    #[test]
+    fn test_parse_raw_response_404() {
+        let raw = b"HTTP/1.1 404 Not Found\r\n\r\n";
+        let res = parse_raw_response(raw).unwrap();
+        assert_eq!(res.status().as_u16(), 404);
+    }
+
+    // ── serialize_response ─────────────────────────────────────
+
+    #[test]
+    fn test_serialize_response_roundtrip() {
+        let raw = b"HTTP/1.1 301 Moved Permanently\r\nLocation: /new-path\r\n\r\n";
+        let res = parse_raw_response(raw).unwrap();
+        let serialized = serialize_response(&res);
+        let res2 = parse_raw_response(&serialized).unwrap();
+
+        assert_eq!(res2.status(), res.status());
+        assert_eq!(
+            res2.headers().get("location").unwrap(),
+            "/new-path"
+        );
+    }
+
+    #[test]
+    fn test_serialize_response_includes_body() {
+        let res = Response::builder()
+            .status(200)
+            .header("content-type", "application/json")
+            .body(Body::Full(Bytes::from("{\"ok\":true}")))
+            .unwrap();
+
+        let bytes = serialize_response(&res);
+        let text = String::from_utf8_lossy(&bytes);
+
+        assert!(text.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(text.contains("content-type: application/json"));
+        assert!(text.ends_with("{\"ok\":true}"));
+    }
+
+    #[test]
+    fn test_serialize_response_no_body_for_204() {
+        let res = Response::builder()
+            .status(204)
+            .body(Body::Full(Bytes::new()))
+            .unwrap();
+
+        let bytes = serialize_response(&res);
+        let text = String::from_utf8_lossy(&bytes);
+
+        assert!(text.starts_with("HTTP/1.1 204 No Content\r\n"));
+        assert!(text.ends_with("\r\n\r\n"));
+    }
+
+
+
+
+
+    // ── is_no_body_status ──────────────────────────────────────
+
+    #[test]
+    fn test_is_no_body_status_true_for_101_204_304() {
+        assert!(is_no_body_status("HTTP/1.1 101 Switching Protocols\r\n"));
+        assert!(is_no_body_status("HTTP/1.1 204 No Content\r\n"));
+        assert!(is_no_body_status("HTTP/1.1 304 Not Modified\r\n"));
+    }
+
+    #[test]
+    fn test_is_no_body_status_false_for_200() {
+        assert!(!is_no_body_status("HTTP/1.1 200 OK\r\n"));
+    }
+
+    // ── is_chunked ─────────────────────────────────────────────
+
+    #[test]
+    fn test_is_chunked_detects_transfer_encoding() {
+        // The function uses str::lines() which handles both \n and \r\n.
+        // Test with just \n to avoid platform-specific line-ending issues.
+        assert!(is_chunked("Transfer-Encoding: chunked\n"));
+        assert!(is_chunked("transfer-encoding: Chunked\n"));
+        assert!(!is_chunked("Content-Length: 100\n"));
+    }
+
+    // ── get_content_length ─────────────────────────────────────
+
+    #[test]
+    fn test_get_content_length_parses_value() {
+        assert_eq!(
+            get_content_length("Content-Length: 1024\r\n"),
+            Some(1024)
+        );
+        assert_eq!(
+            get_content_length("content-length: 0\r\n"),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn test_get_content_length_missing_returns_none() {
+        assert_eq!(get_content_length("Host: example.com\r\n"), None);
+    }
 }

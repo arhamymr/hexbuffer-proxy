@@ -107,3 +107,95 @@ where
     let _ = client_ws.close(None).await;
     Ok(())
 }
+
+
+// ── Tests ──────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http::{Request, Response};
+    use crate::handler::Body;
+
+    fn make_upgrade_request() -> Request<Body> {
+        Request::builder()
+            .uri("ws://example.com/chat")
+            .header("Upgrade", "websocket")
+            .header("Connection", "upgrade")
+            .body(Body::Full(bytes::Bytes::new()))
+            .unwrap()
+    }
+
+    #[test]
+    fn test_is_websocket_upgrade_true() {
+        let req = make_upgrade_request();
+        assert!(is_websocket_upgrade(&req));
+    }
+
+    #[test]
+    fn test_is_websocket_upgrade_missing_connection() {
+        let req = Request::builder()
+            .uri("ws://example.com/chat")
+            .header("Upgrade", "websocket")
+            .body(Body::Full(bytes::Bytes::new()))
+            .unwrap();
+        assert!(!is_websocket_upgrade(&req));
+    }
+
+    #[test]
+    fn test_is_websocket_upgrade_case_insensitive() {
+        let req = Request::builder()
+            .uri("ws://example.com/chat")
+            .header("upgrade", "WebSocket")
+            .header("connection", "Upgrade")
+            .body(Body::Full(bytes::Bytes::new()))
+            .unwrap();
+        assert!(is_websocket_upgrade(&req));
+    }
+
+    #[test]
+    fn test_is_websocket_upgrade_not_websocket() {
+        let req = Request::builder()
+            .uri("https://example.com/")
+            .header("Host", "example.com")
+            .body(Body::Full(bytes::Bytes::new()))
+            .unwrap();
+        assert!(!is_websocket_upgrade(&req));
+    }
+
+    #[test]
+    fn test_is_websocket_upgrade_bytes_true() {
+        let raw = b"GET /chat HTTP/1.1\r\nUpgrade: websocket\r\nConnection: upgrade\r\n\r\n";
+        assert!(is_websocket_upgrade_bytes(raw));
+    }
+
+    #[test]
+    fn test_is_websocket_upgrade_bytes_false() {
+        let raw = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        assert!(!is_websocket_upgrade_bytes(raw));
+    }
+
+    #[test]
+    fn test_is_websocket_response_101() {
+        let res = Response::builder()
+            .status(101)
+            .body(Body::Full(bytes::Bytes::new()))
+            .unwrap();
+        assert!(is_websocket_response(&res));
+    }
+
+    #[test]
+    fn test_is_websocket_response_not_101() {
+        let res200 = Response::builder()
+            .status(200)
+            .body(Body::Full(bytes::Bytes::new()))
+            .unwrap();
+        assert!(!is_websocket_response(&res200));
+
+        let res404 = Response::builder()
+            .status(404)
+            .body(Body::Full(bytes::Bytes::new()))
+            .unwrap();
+        assert!(!is_websocket_response(&res404));
+    }
+}

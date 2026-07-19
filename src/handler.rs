@@ -169,3 +169,36 @@ pub struct NoopWebSocketHandler;
 
 #[async_trait]
 impl WebSocketHandler for NoopWebSocketHandler {}
+
+
+// ── Tests ──────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http_body_util::BodyExt;
+
+    #[tokio::test]
+    async fn test_full_body_creates_correct_bytes() {
+        let body = full_body("payload");
+        let collected = body.collect().await.unwrap().to_bytes();
+        assert_eq!(&collected[..], b"payload");
+    }
+
+    #[test]
+    fn test_body_from_bytes() {
+        let b = bytes::Bytes::from("data");
+        let body: Body = b.into();
+        match body {
+            Body::Full(bytes) => assert_eq!(&bytes[..], b"data"),
+            Body::Streaming(_) => panic!("expected Full variant"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_body_full_into_bytes() {
+        let body = Body::Full(bytes::Bytes::from("hello"));
+        let result = body.into_bytes().await.unwrap();
+        assert_eq!(&result[..], b"hello");
+    }
+}

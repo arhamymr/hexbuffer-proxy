@@ -57,11 +57,11 @@ src/
 ├── main.rs        # Entry point — thin binary, 12 lines via ProxyBuilder
 ├── lib.rs         # Library root — module declarations + public re-exports
 ├── ca.rs          # Certificate authority — generates CA & per-domain TLS certs (rcgen)
-├── proxy.rs       # Request dispatcher — routes CONNECT vs plain HTTP, shared helpers
+├── proxy.rs       # Request dispatcher — routes CONNECT vs HTTP, shared parse/serialize/body helpers
+├── http_proxy.rs  # Plain HTTP — forward proxy handler, host extraction, WS relay
 ├── https_proxy.rs # HTTPS MITM — TLS interception, cert forging, handler pipeline
 ├── ws_proxy.rs    # WebSocket — upgrade detection, bidirectional relay, frame handler
 ├── upstream.rs    # Tower service stack — Hyper client + DecompressionLayer, HTTP/2 ALPN
-├── parser.rs      # CONNECT request line parser — extracts host:port
 ├── handler.rs     # HttpHandler + WebSocketHandler traits, Body, HttpContext, Direction
 ├── builder.rs     # ProxyBuilder — ergonomic proxy configuration
 └── error.rs       # Centralized ProxyError enum (thiserror)
@@ -90,7 +90,7 @@ Preferences → Privacy & Security → Certificates → View Certificates → Au
 - ✅ **Handler pipeline** — parse → handler stack → serialize integrated into proxy flow
 - ✅ **Short-circuit support** — return responses without contacting upstream
 - ✅ **Library + binary split** — `lib.rs` with `pub(crate)` visibility, thin `main.rs`
-- ✅ **Module separation** — `https_proxy.rs` + `ws_proxy.rs` + `upstream.rs` extracted
+- ✅ **Clean module separation** — `http_proxy.rs` + `https_proxy.rs` + `ws_proxy.rs` + `upstream.rs`
 - ✅ **Streaming body support** — Content-Length, chunked transfer encoding, Connection: close
 - ✅ **WebSocket support** — upgrade detection, bidirectional relay, `WebSocketHandler` trait
 - ✅ **Upstream connection pooling** — Hyper client with `LazyLock`-shared pool, HTTP/2 ALPN

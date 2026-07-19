@@ -7,8 +7,8 @@ pub mod handler;
 pub mod builder;
 
 // Internal modules
-mod parser;
 mod proxy;
+mod http_proxy;
 mod https_proxy;
 mod ws_proxy;
 mod upstream;
