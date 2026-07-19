@@ -97,12 +97,10 @@ pub(crate) async fn handle_https(
     server_stream.write_all(&forward_bytes).await?;
 
     // Read response from upstream
-    let mut response_buf = vec![0; buf_size];
-    let resp_bytes = server_stream.read(&mut response_buf).await?;
-    response_buf.truncate(resp_bytes);
+    let full_response = proxy::read_full_response(&mut server_stream, buf_size).await?;
 
     // ── handler: response ───────────────────────────────────────────
-    let response = proxy::parse_raw_response(&response_buf)?;
+    let response = proxy::parse_raw_response(&full_response)?;
     let modified_response = handler.handle_response(&mut ctx, response).await?;
     let final_bytes = proxy::serialize_response(&modified_response);
 

@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::net::SocketAddr;
 
 // tokio
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 // http
@@ -83,12 +83,10 @@ pub(crate) async fn handle_client(
         server_stream.write_all(&forward_bytes).await?;
 
         // Read response
-        let mut response_buf = vec![0; buf_size];
-        let resp_bytes = server_stream.read(&mut response_buf).await?;
-        response_buf.truncate(resp_bytes);
+        let full_response = read_full_response(&mut server_stream, buf_size).await?;
 
         // Handler: response
-        let response = parse_raw_response(&response_buf)?;
+        let response = parse_raw_response(&full_response)?;
         let modified_response = handler.handle_response(&mut ctx, response).await?;
         let final_bytes = serialize_response(&modified_response);
 
@@ -263,4 +261,164 @@ pub(crate) fn force_connection_close_bytes(raw: &[u8]) -> Vec<u8> {
         }
         out
     }
+}
+
+// ── Response body reader ──────────────────────────────────────────
+
+/// Read a complete HTTP response from a stream, handling
+/// Content-Length, chunked transfer encoding, and Connection: close.
+pub(crate) async fn read_full_response<R: AsyncRead + Unpin>(
+    stream: &mut R,
+    buf_size: usize,
+) -> anyhow::Result<Vec<u8>> {
+    let mut full = Vec::new();
+    let mut chunk = vec![0; buf_size];
+
+    // Read until we have headers (\r\n\r\n)
+    loop {
+        let n = stream.read(&mut chunk).await?;
+        if n == 0 {
+            break;
+        }
+        full.extend_from_slice(&chunk[..n]);
+        if full.windows(4).any(|w| w == b"\r\n\r\n") {
+            break;
+        }
+    }
+
+    let header_end = full
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|i| i + 4)
+        .unwrap_or(full.len());
+
+    let headers = String::from_utf8_lossy(&full[..header_end]).into_owned();
+    let body_tail: Vec<u8> = full[header_end..].to_vec();
+
+    let body = read_http_body(stream, &headers, body_tail, buf_size).await?;
+
+    let mut result = full[..header_end].to_vec();
+    result.extend_from_slice(&body);
+    Ok(result)
+}
+
+fn is_chunked(headers: &str) -> bool {
+    headers
+        .lines()
+        .any(|l| l.to_lowercase().starts_with("transfer-encoding:")
+             && l.contains("chunked"))
+}
+
+fn get_content_length(headers: &str) -> Option<usize> {
+    headers
+        .lines()
+        .find(|l| l.to_lowercase().starts_with("content-length:"))
+        .and_then(|l| l.split(':').nth(1))
+        .and_then(|v| v.trim().parse().ok())
+}
+
+async fn read_http_body<R: AsyncRead + Unpin>(
+    stream: &mut R,
+    headers: &str,
+    initial: Vec<u8>,
+    buf_size: usize,
+) -> anyhow::Result<Vec<u8>> {
+    if is_chunked(headers) {
+        read_chunked_body(stream, initial, buf_size).await
+    } else if let Some(len) = get_content_length(headers) {
+        read_exact(stream, initial, len, buf_size).await
+    } else {
+        read_until_close(stream, initial, buf_size).await
+    }
+}
+
+async fn read_chunked_body<R: AsyncRead + Unpin>(
+    stream: &mut R,
+    initial: Vec<u8>,
+    buf_size: usize,
+) -> anyhow::Result<Vec<u8>> {
+    let mut body = Vec::new();
+    let mut buf = initial;
+    let mut chunk = vec![0; buf_size];
+
+    loop {
+        // Find end of chunk-size line
+        while !buf.contains(&b'\n') {
+            let n = stream.read(&mut chunk).await?;
+            if n == 0 {
+                return Ok(body);
+            }
+            buf.extend_from_slice(&chunk[..n]);
+        }
+
+        let nl = buf.iter().position(|&b| b == b'\n').unwrap();
+        let size_line = String::from_utf8_lossy(&buf[..nl]);
+        let hex_str = size_line.trim().split(';').next().unwrap_or("0");
+        let chunk_size = usize::from_str_radix(hex_str, 16)
+            .map_err(|_| anyhow::anyhow!("invalid chunk size: {}", hex_str))?;
+
+        if chunk_size == 0 {
+            break;
+        }
+
+        // Remove size line, read data + trailing \r\n
+        buf.drain(..=nl);
+        let needed = chunk_size + 2;
+
+        while buf.len() < needed {
+            let n = stream.read(&mut chunk).await?;
+            if n == 0 {
+                return Ok(body);
+            }
+            buf.extend_from_slice(&chunk[..n]);
+        }
+
+        body.extend_from_slice(&buf[..chunk_size]);
+        buf.drain(..needed);
+    }
+
+    Ok(body)
+}
+
+async fn read_exact<R: AsyncRead + Unpin>(
+    stream: &mut R,
+    initial: Vec<u8>,
+    content_length: usize,
+    buf_size: usize,
+) -> anyhow::Result<Vec<u8>> {
+    let mut buf = initial;
+    let mut chunk = vec![0; buf_size];
+
+    while buf.len() < content_length {
+        let n = stream.read(&mut chunk).await?;
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    }
+
+    if buf.len() > content_length {
+        buf.truncate(content_length);
+    }
+
+    Ok(buf)
+}
+
+async fn read_until_close<R: AsyncRead + Unpin>(
+    stream: &mut R,
+    initial: Vec<u8>,
+    buf_size: usize,
+) -> anyhow::Result<Vec<u8>> {
+    let mut buf = initial;
+    let mut chunk = vec![0; buf_size];
+
+    loop {
+        let n = stream.read(&mut chunk).await?;
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    }
+
+    Ok(buf)
 }
