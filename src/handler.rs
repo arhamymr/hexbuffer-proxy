@@ -93,6 +93,14 @@ pub trait HttpHandler: Send + Sync {
         ctx: &mut HttpContext,
         response: Response<Body>,
     ) -> Result<Response<Body>>;
+
+    /// Called before TLS interception for a CONNECT tunnel.
+    /// Return `false` to skip MITM and relay raw TCP
+    /// (e.g. for cert-pinned domains like `gemini.google.com`).
+    /// Default: `true` (intercept all).
+    async fn should_intercept_tls(&self, _host: &str) -> bool {
+        true
+    }
 }
 
 // ── NoopHandler ────────────────────────────────────────────────────

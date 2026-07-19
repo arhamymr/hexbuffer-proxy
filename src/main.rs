@@ -81,6 +81,42 @@ impl HttpHandler for LoggingHandler {
     }
 }
 
+// ── PassthroughHandler ──────────────────────────────────────
+
+/// Lets CONNECT tunnels bypass MITM for configured domains.
+/// Suffix-match: `".google.com"` covers all subdomains.
+struct PassthroughHandler {
+    passthrough: Vec<String>,
+}
+
+#[async_trait]
+impl HttpHandler for PassthroughHandler {
+    async fn handle_request(
+        &self,
+        _ctx: &mut HttpContext,
+        request: Request<Body>,
+    ) -> hexbuffer_proxy::Result<RequestOrResponse> {
+        Ok(RequestOrResponse::Request(request))
+    }
+
+    async fn handle_response(
+        &self,
+        _ctx: &mut HttpContext,
+        response: Response<Body>,
+    ) -> hexbuffer_proxy::Result<Response<Body>> {
+        Ok(response)
+    }
+
+    async fn should_intercept_tls(&self, host: &str) -> bool {
+        for p in &self.passthrough {
+            if host == p.as_str() || host.ends_with(&format!(".{p}")) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
 // ── BlocklistHandler ──────────────────────────────────────────
 
 /// Blocks requests to configured host patterns (demo WAF rule).
@@ -204,6 +240,9 @@ async fn main() -> anyhow::Result<()> {
     let proxy = ProxyBuilder::new()
         .with_ca(ca)
         .with_http_handler(LoggingHandler::new())
+        .add_http_handler(PassthroughHandler {
+            passthrough: vec!["gemini.google.com".into()],
+        })
         .add_http_handler(BlocklistHandler {
             blocked: vec![
                 "doubleclick.net".into(),

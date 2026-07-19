@@ -46,7 +46,7 @@ pub(crate) async fn handle_http(
             client_stream.shutdown().await?;
             Ok(())
         }
-        RequestOrResponse::Request(req) => {
+        RequestOrResponse::Request(mut req) => {
             if is_ws {
                 // ── WebSocket: raw TCP relay ──────────────
                 let bytes = proxy::serialize_request(&req);
@@ -80,6 +80,15 @@ pub(crate) async fn handle_http(
             } else {
                 // ── Normal HTTP: Hyper client ─────────────
                 // (connection pooling, HTTP/2, transparent decompression)
+
+                // Hyper requires absolute URI for forward proxy requests.
+                if req.uri().scheme().is_none() {
+                    let uri: http::Uri = format!("http://{}{}", host, req.uri())
+                        .parse()
+                        .map_err(|e| anyhow::anyhow!("invalid absolute URI: {e}"))?;
+                    *req.uri_mut() = uri;
+                }
+
                 let response = crate::upstream::send_request(req).await?;
                 let modified_response = handler.handle_response(&mut ctx, response).await?;
                 let final_bytes = proxy::serialize_response(&modified_response);

@@ -175,6 +175,15 @@ impl HttpHandler for HandlerStack {
         }
         Ok(response)
     }
+
+    async fn should_intercept_tls(&self, host: &str) -> bool {
+        for handler in &self.handlers {
+            if !handler.should_intercept_tls(host).await {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 // ── Tests ──────────────────────────────────────────────────────────

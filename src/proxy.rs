@@ -91,7 +91,14 @@ pub(crate) fn parse_raw_request(raw: &[u8]) -> anyhow::Result<Request<Body>> {
         }
     }
 
-    Ok(builder.body(Body::Full(bytes::Bytes::new())).unwrap())
+    // Extract body after \r\n\r\n
+    let body_bytes = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|pos| bytes::Bytes::copy_from_slice(&raw[pos + 4..]))
+        .unwrap_or_default();
+
+    Ok(builder.body(Body::Full(body_bytes)).unwrap())
 }
 
 pub(crate) fn serialize_request(req: &Request<Body>) -> Vec<u8> {
@@ -139,7 +146,14 @@ pub(crate) fn parse_raw_response(raw: &[u8]) -> anyhow::Result<Response<Body>> {
         }
     }
 
-    Ok(builder.body(Body::Full(bytes::Bytes::new())).unwrap())
+    // Extract body after \r\n\r\n
+    let body_bytes = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|pos| bytes::Bytes::copy_from_slice(&raw[pos + 4..]))
+        .unwrap_or_default();
+
+    Ok(builder.body(Body::Full(body_bytes)).unwrap())
 }
 
 pub(crate) fn serialize_response(res: &Response<Body>) -> Vec<u8> {

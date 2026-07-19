@@ -36,6 +36,21 @@ pub(crate) async fn handle_https(
     let mut client = client_stream;
     client.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").await?;
 
+    // ── Handler decides: intercept or tunnel? ─────────────────────
+    if !handler.should_intercept_tls(&target_host).await {
+        let mut server = TcpStream::connect(target).await?;
+
+        let (mut cr, mut cw) = client.split();
+        let (mut sr, mut sw) = server.split();
+
+        tokio::select! {
+            r = tokio::io::copy(&mut cr, &mut sw) => { let _ = r; }
+            r = tokio::io::copy(&mut sr, &mut cw) => { let _ = r; }
+        }
+
+        return Ok(());
+    }
+
     // Forge certificate for this domain on the fly
     let (cert_der, key_der) = ca.forge_certificate(&target_host);
 
@@ -75,7 +90,7 @@ pub(crate) async fn handle_https(
             tls_client.shutdown().await?;
             return Ok(());
         }
-        RequestOrResponse::Request(req) => {
+        RequestOrResponse::Request(mut req) => {
             if is_ws {
                 // ── WebSocket: raw TLS upstream relay ──────────
                 let bytes = proxy::serialize_request(&req);
@@ -117,6 +132,16 @@ pub(crate) async fn handle_https(
             } else {
                 // ── Normal HTTPS: Hyper client ────────────────
                 // (connection pooling, HTTP/2, transparent decompression)
+
+                // Hyper requires absolute URI; inner request after MITM
+                // decryption has a relative path (e.g. /feed/).
+                if req.uri().scheme().is_none() {
+                    let uri: http::Uri = format!("https://{}{}", target_host, req.uri())
+                        .parse()
+                        .map_err(|e| anyhow::anyhow!("invalid absolute URI: {e}"))?;
+                    *req.uri_mut() = uri;
+                }
+
                 let response = crate::upstream::send_request(req).await?;
                 let modified_response = handler.handle_response(&mut ctx, response).await?;
                 let final_bytes = proxy::serialize_response(&modified_response);
@@ -129,3 +154,4 @@ pub(crate) async fn handle_https(
 
     Ok(())
 }
+

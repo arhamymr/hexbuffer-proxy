@@ -34,10 +34,12 @@ static SERVICE: LazyLock<DecompressionSvc> = LazyLock::new(|| {
     let https = hyper_rustls::HttpsConnectorBuilder::new()
         .with_webpki_roots()
         .https_or_http()
-        .enable_http2()
+        .enable_http1()
         .build();
 
-    let client = Client::builder(TokioExecutor::new()).build(https);
+    let client = Client::builder(TokioExecutor::new())
+        .pool_max_idle_per_host(20)
+        .build(https);
 
     DecompressionLayer::new()
         .gzip(true)
