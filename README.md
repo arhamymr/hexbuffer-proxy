@@ -54,13 +54,15 @@ The proxy listens on `127.0.0.1:8080`. Configure your browser or system to use i
 
 ```
 src/
-├── main.rs    # Entry point — one-liner via ProxyBuilder
-├── ca.rs      # Certificate authority — generates CA & per-domain TLS certs (rcgen)
-├── proxy.rs   # CONNECT tunnel handling — TLS interception + handler pipeline
-├── parser.rs  # CONNECT request line parser — extracts host:port
-├── handler.rs # HttpHandler trait, Body, HttpContext, RequestOrResponse, NoopHandler
-├── builder.rs # ProxyBuilder — ergonomic proxy configuration
-└── error.rs   # Centralized ProxyError enum (thiserror)
+├── main.rs        # Entry point — thin binary, 12 lines via ProxyBuilder
+├── lib.rs         # Library root — module declarations + public re-exports
+├── ca.rs          # Certificate authority — generates CA & per-domain TLS certs (rcgen)
+├── proxy.rs       # Request dispatcher — routes CONNECT vs plain HTTP, shared helpers
+├── https_proxy.rs # HTTPS MITM — TLS interception, cert forging, handler pipeline
+├── parser.rs      # CONNECT request line parser — extracts host:port
+├── handler.rs     # HttpHandler trait, Body, HttpContext, RequestOrResponse, NoopHandler
+├── builder.rs     # ProxyBuilder — ergonomic proxy configuration
+└── error.rs       # Centralized ProxyError enum (thiserror)
 ```
 
 ## Trusting the CA Certificate
@@ -78,19 +80,21 @@ Preferences → Privacy & Security → Certificates → View Certificates → Au
 ## Current Implementation State
 
 - ✅ HTTPS MITM interception via CONNECT tunneling
+- ✅ Plain HTTP proxying — forward non-CONNECT requests with handler hooks
 - ✅ Dynamic TLS certificate generation per domain
 - ✅ CA certificate persistence, caching, and auto-creation
 - ✅ **Trait-based `HttpHandler` system** — intercept and modify requests/responses
 - ✅ **`ProxyBuilder`** — ergonomic one-liner proxy configuration
 - ✅ **Handler pipeline** — parse → handler stack → serialize integrated into proxy flow
 - ✅ **Short-circuit support** — return responses without contacting upstream
+- ✅ **Library + binary split** — `lib.rs` with `pub(crate)` visibility, thin `main.rs`
+- ✅ **Module separation** — `https_proxy.rs` extracted from `proxy.rs`
 - ✅ Unit test coverage for builder, handler stack, and core modules
 
 ## Future Planning
 
 See [docs/plan.md](docs/plan.md) for the full roadmap. Planned features:
 
-- **Plain HTTP proxying** — forward non-CONNECT requests with handler hooks
 - **WebSocket support** — intercept and relay WebSocket frames with message modification
 - **HTTP/2 support** — optional feature-gated HTTP/2 proxying
 - **Body decoding helpers** — decode gzip/deflate/brotli/zstd compressed bodies
@@ -106,5 +110,7 @@ See [docs/plan.md](docs/plan.md) for the full roadmap. Planned features:
 | `webpki-roots` | Trusted root CA store for upstream connections |
 | `hyper` / `http` | HTTP types and parsing |
 | `async-trait` | Async trait dynamic dispatch |
+| `thiserror` | Ergonomic error types |
+| `bytes` | Zero-copy byte buffers |
 | `thiserror` | Ergonomic error types |
 | `bytes` | Zero-copy byte buffers |

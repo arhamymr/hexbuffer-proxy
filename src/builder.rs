@@ -127,7 +127,7 @@ impl Proxy {
 
 /// Chains multiple handlers — each sees the output of the previous.
 /// Short-circuit responses stop the chain immediately.
-struct HandlerStack {
+pub(crate) struct HandlerStack {
     handlers: Vec<Arc<dyn HttpHandler>>,
 }
 

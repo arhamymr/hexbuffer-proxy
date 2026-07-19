@@ -10,23 +10,18 @@ use std::net::SocketAddr;
 // tokio
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio_rustls::{
-    TlsAcceptor, TlsConnector,
-    rustls::{ServerConfig, pki_types::{CertificateDer, PrivateKeyDer}}
-};
 
 // http
 use http::{Request, Response};
 
 /// Hook point counter for generating unique request IDs.
-#[allow(dead_code)]
-static REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+pub(crate) static REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
-pub async fn handle_client(
+pub(crate) async fn handle_client(
     mut client_stream: TcpStream,
     ca: Arc<CertificationAuthority>,
     handler: Arc<dyn HttpHandler>,
-    _buf_size: usize,
+    buf_size: usize,
 ) -> anyhow::Result<()> {
 
     // 1. Read the initial Request header 
@@ -42,93 +37,63 @@ pub async fn handle_client(
 
     // 2. Lifecycle check: identify if it is an HTTPS tunnel setup
     if request_str.starts_with("CONNECT") {
-        // Extract host (e.g. example.com:443)
-        let Some(target_address) = parse_connect_request(&request_str) else {
+        let Some(target) = parse_connect_request(&request_str) else {
             anyhow::bail!("failed to parse CONNECT target");
         };
-        let target_address = target_address.to_string();
-        let target_hosts = target_address.split(':').next().unwrap_or(&target_address).to_string();
 
-        // tell the browser 
-        client_stream.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").await?;
+        return crate::https_proxy::handle_https(
+            client_stream, ca, handler, target, client_addr, buf_size,
+        ).await;
 
-        // 3. Forge Certificate for this domain on the fly 
-        let (cert_der, key_der) = ca.forge_certificate(&target_hosts);
+    } else {
+        // ── Plain HTTP (non-CONNECT) ─────────────────────────
+        let request_bytes = request_str.as_bytes();
+        let request = parse_raw_request(request_bytes)?;
 
-        // 4. Client handshake: Spin up a local TLS server config just for this stream
-        let server_config = ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(
-                vec![CertificateDer::from(cert_der)],
-                PrivateKeyDer::Pkcs8(key_der.into())
-            )?;
+        // Resolve target from Host header or absolute URI
+        let host = extract_host(&request, &request_str)?;
+        let target = if host.contains(':') {
+            host.clone()
+        } else {
+            format!("{}:80", host)
+        };
 
-        let acceptor = TlsAcceptor::from(Arc::new(server_config));
-        let mut tls_client_stream = acceptor.accept(client_stream).await?;
-
-        // 5. Read the true inner decrypted payload
-        let mut inner_buf = vec![0; _buf_size];
-        let bytes_read = tls_client_stream.read(&mut inner_buf).await?;
-        inner_buf.truncate(bytes_read);
-
-        // ── handler: request ────────────────────────────────────────
+        // Handler: request
         let req_id = REQUEST_ID.fetch_add(1, Ordering::SeqCst);
         let mut ctx = HttpContext {
             id: req_id,
-            host: target_hosts.clone(),
+            host: host.clone(),
             client_addr,
-            is_https: true,
+            is_https: false,
         };
 
-        let request = parse_raw_request(&inner_buf)?;
-
         let modified_bytes = match handler.handle_request(&mut ctx, request).await? {
-            RequestOrResponse::Request(req) => {
-                serialize_request(&req)
-            }
+            RequestOrResponse::Request(req) => serialize_request(&req),
             RequestOrResponse::Response(res) => {
-                // Short-circuit: return response directly to client
                 let res_bytes = serialize_response(&res);
-                tls_client_stream.write_all(&res_bytes).await?;
-                tls_client_stream.shutdown().await?;
+                client_stream.write_all(&res_bytes).await?;
+                client_stream.shutdown().await?;
                 return Ok(());
             }
         };
 
-        // 6. Connect to target server via TLS 
-        let server_stream = TcpStream::connect(&target_address).await?;
-
-        let root_store = tokio_rustls::rustls::RootCertStore {
-            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-        };
-        
-        let tls_config = tokio_rustls::rustls::ClientConfig::builder()
-            .with_root_certificates(root_store)
-            .with_no_client_auth();
-
-        let connector = TlsConnector::from(Arc::new(tls_config));
-        let domain = target_hosts.try_into().unwrap_or_else(|_| "localhost".try_into().unwrap());
-        let mut server_stream = connector.connect(domain, server_stream).await?;
-
-        // Force Connection: close so read_to_end doesn't hang on HTTP/1.1 keep-alive
+        // Connect upstream (plain TCP, no TLS)
+        let mut server_stream = TcpStream::connect(&target).await?;
         let forward_bytes = force_connection_close_bytes(&modified_bytes);
         server_stream.write_all(&forward_bytes).await?;
 
-        // 7. Read response from upstream
-        let mut response_buf = vec![0; _buf_size];
+        // Read response
+        let mut response_buf = vec![0; buf_size];
         let resp_bytes = server_stream.read(&mut response_buf).await?;
         response_buf.truncate(resp_bytes);
 
-        // ── handler: response ───────────────────────────────────────
+        // Handler: response
         let response = parse_raw_response(&response_buf)?;
         let modified_response = handler.handle_response(&mut ctx, response).await?;
         let final_bytes = serialize_response(&modified_response);
 
-        tls_client_stream.write_all(&final_bytes).await?;
-        tls_client_stream.shutdown().await?;
-
-    } else {
-        // eprintln!("Non-HTTPS request received");
+        client_stream.write_all(&final_bytes).await?;
+        client_stream.shutdown().await?;
     }
 
     Ok(())
@@ -137,7 +102,26 @@ pub async fn handle_client(
 
 // ── HTTP parse / serialize helpers ────────────────────────────────
 
-fn parse_raw_request(raw: &[u8]) -> anyhow::Result<Request<Body>> {
+/// Extract target host from Host header or absolute URI.
+fn extract_host(req: &Request<Body>, raw: &str) -> anyhow::Result<String> {
+    // 1. Try Host header
+    if let Some(host) = req.headers().get("host").and_then(|v| v.to_str().ok()) {
+        return Ok(host.to_string());
+    }
+
+    // 2. Fallback: absolute URI (e.g. proxy requests like GET http://example.com/)
+    if let Some(uri) = raw.lines().next().and_then(|l| l.split_whitespace().nth(1)) {
+        for prefix in &["http://", "https://"] {
+            if let Some(rest) = uri.strip_prefix(prefix) {
+                return Ok(rest.split('/').next().unwrap_or(rest).to_string());
+            }
+        }
+    }
+
+    anyhow::bail!("could not determine target host — missing Host header");
+}
+
+pub(crate) fn parse_raw_request(raw: &[u8]) -> anyhow::Result<Request<Body>> {
     let text = String::from_utf8_lossy(raw);
     let mut lines = text.lines();
 
@@ -171,7 +155,7 @@ fn parse_raw_request(raw: &[u8]) -> anyhow::Result<Request<Body>> {
     Ok(builder.body(Body::Full(body_bytes))?)
 }
 
-fn serialize_request(req: &Request<Body>) -> Vec<u8> {
+pub(crate) fn serialize_request(req: &Request<Body>) -> Vec<u8> {
     let mut out = Vec::new();
 
     // request line
@@ -197,7 +181,7 @@ fn serialize_request(req: &Request<Body>) -> Vec<u8> {
     out
 }
 
-fn parse_raw_response(raw: &[u8]) -> anyhow::Result<Response<Body>> {
+pub(crate) fn parse_raw_response(raw: &[u8]) -> anyhow::Result<Response<Body>> {
     let text = String::from_utf8_lossy(raw);
     let mut lines = text.lines();
 
@@ -232,7 +216,7 @@ fn parse_raw_response(raw: &[u8]) -> anyhow::Result<Response<Body>> {
     Ok(builder.body(Body::Full(body_bytes))?)
 }
 
-fn serialize_response(res: &Response<Body>) -> Vec<u8> {
+pub(crate) fn serialize_response(res: &Response<Body>) -> Vec<u8> {
     let mut out = Vec::new();
 
     // status line
@@ -258,7 +242,7 @@ fn serialize_response(res: &Response<Body>) -> Vec<u8> {
     out
 }
 
-fn force_connection_close_bytes(raw: &[u8]) -> Vec<u8> {
+pub(crate) fn force_connection_close_bytes(raw: &[u8]) -> Vec<u8> {
     let text = String::from_utf8_lossy(raw);
 
     let modified = text
