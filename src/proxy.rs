@@ -1,6 +1,6 @@
 use crate::ca::CertificationAuthority;
 use crate::parser::parse_connect_request;
-use crate::handler::{HttpHandler, HttpContext, RequestOrResponse, Body};
+use crate::handler::{HttpHandler, HttpContext, RequestOrResponse, Body, WebSocketHandler};
 
 // std
 use std::sync::Arc;
@@ -20,6 +20,7 @@ pub(crate) async fn handle_client(
     mut client_stream: TcpStream,
     ca: Arc<CertificationAuthority>,
     handler: Arc<dyn HttpHandler>,
+    ws_handler: Option<Arc<dyn WebSocketHandler>>,
     buf_size: usize,
 ) -> anyhow::Result<()> {
 
@@ -41,7 +42,7 @@ pub(crate) async fn handle_client(
         };
 
         return crate::https_proxy::handle_https(
-            client_stream, ca, handler, target, client_addr, buf_size,
+            client_stream, ca, handler, ws_handler, target, client_addr, buf_size,
         ).await;
 
     } else {
@@ -90,9 +91,15 @@ pub(crate) async fn handle_client(
 
                     client_stream.write_all(&final_bytes).await?;
                     if crate::ws_proxy::is_websocket_response(&modified_response) {
-                        crate::ws_proxy::relay_websocket(
-                            &mut client_stream, &mut server_stream,
-                        ).await?;
+                        if let Some(ws) = ws_handler {
+                            crate::ws_proxy::relay_framed(
+                                client_stream, server_stream, ws, &mut ctx,
+                            ).await?;
+                        } else {
+                            crate::ws_proxy::relay_websocket(
+                                &mut client_stream, &mut server_stream,
+                            ).await?;
+                        }
                     } else {
                         client_stream.shutdown().await?;
                     }

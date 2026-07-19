@@ -9,7 +9,7 @@ use http::{Request, Response};
 
 use crate::ca::CertificationAuthority;
 use crate::error::Result;
-use crate::handler::{HttpHandler, HttpContext, RequestOrResponse, Body, NoopHandler};
+use crate::handler::{HttpHandler, HttpContext, RequestOrResponse, Body, NoopHandler, WebSocketHandler};
 
 // ── ProxyBuilder ───────────────────────────────────────────────────
 
@@ -18,6 +18,7 @@ pub struct ProxyBuilder {
     addr: SocketAddr,
     ca: Option<CertificationAuthority>,
     handlers: Vec<Arc<dyn HttpHandler>>,
+    ws_handler: Option<Arc<dyn WebSocketHandler>>,
     request_buffer_size: usize,
 }
 
@@ -28,6 +29,7 @@ impl ProxyBuilder {
             addr: "127.0.0.1:8080".parse().unwrap(),
             ca: None,
             handlers: Vec::new(),
+            ws_handler: None,
             request_buffer_size: 16384,
         }
     }
@@ -56,6 +58,12 @@ impl ProxyBuilder {
         self
     }
 
+    /// Set the WebSocket frame handler.
+    pub fn with_ws_handler(mut self, handler: impl WebSocketHandler + 'static) -> Self {
+        self.ws_handler = Some(Arc::new(handler));
+        self
+    }
+
     /// Per-request read buffer size in bytes.
     pub fn with_request_buffer_size(mut self, size: usize) -> Self {
         self.request_buffer_size = size;
@@ -78,6 +86,7 @@ impl ProxyBuilder {
             addr: self.addr,
             ca: Arc::new(ca),
             handler,
+            ws_handler: self.ws_handler,
             request_buffer_size: self.request_buffer_size,
         })
     }
@@ -96,6 +105,7 @@ pub struct Proxy {
     addr: SocketAddr,
     ca: Arc<CertificationAuthority>,
     handler: Arc<dyn HttpHandler>,
+    ws_handler: Option<Arc<dyn WebSocketHandler>>,
     request_buffer_size: usize,
 }
 
@@ -107,15 +117,17 @@ impl Proxy {
 
         let ca = self.ca;
         let handler = self.handler;
+        let ws_handler = self.ws_handler;
         let buf_size = self.request_buffer_size;
 
         loop {
             let (stream, addr) = listener.accept().await?;
             let ca = Arc::clone(&ca);
             let handler = Arc::clone(&handler);
+            let ws_handler = ws_handler.clone();
 
             tokio::spawn(async move {
-                if let Err(e) = crate::proxy::handle_client(stream, ca, handler, buf_size).await {
+                if let Err(e) = crate::proxy::handle_client(stream, ca, handler, ws_handler, buf_size).await {
                     eprintln!("[{}] error: {}", addr, e);
                 }
             });

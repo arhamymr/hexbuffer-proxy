@@ -1,5 +1,5 @@
 use crate::ca::CertificationAuthority;
-use crate::handler::{HttpHandler, HttpContext, RequestOrResponse};
+use crate::handler::{HttpHandler, HttpContext, RequestOrResponse, WebSocketHandler};
 use crate::proxy;
 
 // std
@@ -21,6 +21,7 @@ pub(crate) async fn handle_https(
     client_stream: TcpStream,
     ca: Arc<CertificationAuthority>,
     handler: Arc<dyn HttpHandler>,
+    ws_handler: Option<Arc<dyn WebSocketHandler>>,
     target: &str,       // e.g. "example.com:443"
     client_addr: SocketAddr,
     buf_size: usize,
@@ -101,9 +102,15 @@ pub(crate) async fn handle_https(
 
                 tls_client.write_all(&final_bytes).await?;
                 if crate::ws_proxy::is_websocket_response(&modified_response) {
-                    crate::ws_proxy::relay_websocket(
-                        &mut tls_client, &mut server_stream,
-                    ).await?;
+                    if let Some(ws) = ws_handler {
+                        crate::ws_proxy::relay_framed(
+                            tls_client, server_stream, ws, &mut ctx,
+                        ).await?;
+                    } else {
+                        crate::ws_proxy::relay_websocket(
+                            &mut tls_client, &mut server_stream,
+                        ).await?;
+                    }
                 } else {
                     tls_client.shutdown().await?;
                 }
