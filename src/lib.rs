@@ -1,6 +1,24 @@
 // hexbuffer-proxy — HTTPS MITM proxy library
 //
 // Core modules
+//! # hexbuffer-proxy
+//!
+//! A local MITM (man-in-the-middle) HTTP/HTTPS proxy
+//! built on Tokio + Hyper + rustls.
+//!
+//! ## Architecture
+//!
+//! - [`ProxyBuilder`] assembles the proxy with custom handlers.
+//! - [`HttpHandler`] is the core trait — implement it to inspect or
+//!   mutate traffic.
+//! - HTTPS is intercepted via on-the-fly TLS certificate forging
+//!   (powered by [`CertificationAuthority`]).
+//! - Decrypted inner traffic is served by Hyper's HTTP/1.1 server
+//!   (keep-alive, body framing, pipelining).
+//! - Plain HTTP requests are handled by the same handler pipeline.
+//! - WebSocket connections are detected, relayed, and optionally
+//!   intercepted frame-by-frame via [`WebSocketHandler`].
+
 pub mod ca;
 pub mod error;
 pub mod handler;

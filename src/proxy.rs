@@ -15,6 +15,13 @@ use http::{Request, Response};
 /// Hook point counter for generating unique request IDs.
 pub(crate) static REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Dispatcher: receives the initial bytes from a client connection.
+///
+/// Reads the first 4096 bytes and routes to either:
+/// - [`handle_https`] if the request starts with `CONNECT`
+/// - [`handle_http`] for plain HTTP requests
+///
+/// Also extracts the client's socket address for logging context.
 pub(crate) async fn handle_client(
     mut client_stream: TcpStream,
     ca: Arc<CertificationAuthority>,
@@ -68,6 +75,11 @@ pub(crate) async fn handle_client(
 // ── HTTP parse / serialize helpers ────────────────────────────────
 
 
+/// Parse raw HTTP/1.1 request bytes into a typed [`Request<Body>`].
+///
+/// Splits headers at `\r\n\r\n` and extracts any trailing body bytes
+/// into `Body::Full`.  Used only for plain-HTTP and WebSocket upgrade paths;
+/// HTTPS inner requests are handled by Hyper's server.
 pub(crate) fn parse_raw_request(raw: &[u8]) -> anyhow::Result<Request<Body>> {
     let text = String::from_utf8_lossy(raw);
     let mut lines = text.lines();
@@ -101,6 +113,9 @@ pub(crate) fn parse_raw_request(raw: &[u8]) -> anyhow::Result<Request<Body>> {
     Ok(builder.body(Body::Full(body_bytes)).unwrap())
 }
 
+/// Serialize a typed [`Request<Body>`] back into raw HTTP/1.1 bytes.
+///
+/// Includes the request line, all headers, and the body (when `Body::Full`).
 pub(crate) fn serialize_request(req: &Request<Body>) -> Vec<u8> {
     let mut out = format!(
         "{} {} HTTP/1.1\r\n",
@@ -124,6 +139,7 @@ pub(crate) fn serialize_request(req: &Request<Body>) -> Vec<u8> {
     out
 }
 
+/// Parse raw HTTP/1.1 response bytes into a typed [`Response<Body>`].
 pub(crate) fn parse_raw_response(raw: &[u8]) -> anyhow::Result<Response<Body>> {
     let text = String::from_utf8_lossy(raw);
     let mut lines = text.lines();
@@ -156,6 +172,7 @@ pub(crate) fn parse_raw_response(raw: &[u8]) -> anyhow::Result<Response<Body>> {
     Ok(builder.body(Body::Full(body_bytes)).unwrap())
 }
 
+/// Serialize a typed [`Response<Body>`] back into raw HTTP/1.1 bytes.
 pub(crate) fn serialize_response(res: &Response<Body>) -> Vec<u8> {
     let mut out = format!(
         "HTTP/1.1 {} {}\r\n",
@@ -184,6 +201,13 @@ pub(crate) fn serialize_response(res: &Response<Body>) -> Vec<u8> {
 
 /// Read a complete HTTP response from a stream, handling
 /// Content-Length, chunked transfer encoding, and Connection: close.
+/// Read a complete HTTP *response* from a stream.
+///
+/// Reads headers until `\r\n\r\n`, then reads the body according to:
+/// - `Content-Length` header → exact byte count
+/// - `Transfer-Encoding: chunked` → dechunk
+/// - 101/204/304 status → no body
+/// - Otherwise → read until stream close (HTTP/1.0 semantics)
 pub(crate) async fn read_full_response<R: AsyncRead + Unpin>(
     stream: &mut R,
     buf_size: usize,

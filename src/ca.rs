@@ -21,6 +21,11 @@ use std::path::Path;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 
+/// Self-signed CA that forges per-domain TLS certificates on the fly.
+///
+/// On first run, generates a new CA key/cert and persists them to
+/// `cert/ca.pem` and `cert/ca-key.pem`.  Subsequent runs load from disk
+/// so the same CA is reused across restarts.
 pub struct CertificationAuthority {
     ca_params: CertificateParams,
     ca_cert: Certificate,
@@ -129,7 +134,12 @@ impl CertificationAuthority {
         Ok(())
     }
 
-    pub fn forge_certificate(&self, host: &str) -> (Vec<u8>, Vec<u8>) {
+    /// Generate (or retrieve from cache) a TLS certificate for `host`.
+///
+/// Returns `(cert_der, key_der)` — raw DER-encoded certificate and
+/// private key.  Results are cached per host to avoid redundant
+/// key generation on repeated connections.
+pub fn forge_certificate(&self, host: &str) -> (Vec<u8>, Vec<u8>) {
         let mut cache = self.cert_cache.lock().unwrap();
 
         if let Some(cert) = cache.get(host) {

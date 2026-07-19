@@ -1,6 +1,8 @@
 use thiserror::Error;
 
 #[derive(Error, Debug)]
+/// All errors raised by the proxy.
+/// Wraps I/O, TLS, HTTP, cert, connection, and protocol errors.
 pub enum ProxyError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),

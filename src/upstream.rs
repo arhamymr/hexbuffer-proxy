@@ -56,6 +56,11 @@ static SERVICE: LazyLock<DecompressionSvc> = LazyLock::new(|| {
 /// The response body is fully buffered and transparently
 /// decompressed (gzip, deflate, brotli, zstd) by tower-http's
 /// `DecompressionLayer` middleware — no manual header inspection.
+/// Send a request to the origin server through Hyper's connection pool.
+///
+/// The response body is fully buffered and transparently decompressed
+/// (gzip, deflate, brotli, zstd) by tower-http's `DecompressionLayer`.
+/// Uses HTTP/1.1 only — HTTP/2 multiplexing caused issues with YouTube.
 pub(crate) async fn send_request(req: Request<Body>) -> anyhow::Result<Response<Body>> {
     let (parts, body) = req.into_parts();
 

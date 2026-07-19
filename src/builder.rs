@@ -14,6 +14,16 @@ use crate::handler::{HttpHandler, HttpContext, RequestOrResponse, Body, NoopHand
 // ── ProxyBuilder ───────────────────────────────────────────────────
 
 /// Builder for configuring and launching the proxy.
+/// Builder for assembling and launching a proxy instance.
+///
+/// ## Usage
+/// ```ignore
+/// let proxy = ProxyBuilder::new()
+///     .with_ca(ca)
+///     .with_http_handler(logger)
+///     .build()?;
+/// proxy.run(bind_addr).await?;
+/// ```
 pub struct ProxyBuilder {
     addr: SocketAddr,
     ca: Option<CertificationAuthority>,
@@ -41,23 +51,28 @@ impl ProxyBuilder {
     }
 
     /// Set the certificate authority.
+    /// Provide the CA used to forge per-domain TLS certificates.
     pub fn with_ca(mut self, ca: CertificationAuthority) -> Self {
         self.ca = Some(ca);
         self
     }
 
     /// Set the primary HTTP handler (replaces any existing handlers).
+    /// Set the primary HTTP handler (replaces any previous).
     pub fn with_http_handler(mut self, handler: impl HttpHandler + 'static) -> Self {
         self.handlers = vec![Arc::new(handler)];
         self
     }
 
     /// Append a handler to the stack (chain of responsibility).
+    /// Append an additional HTTP handler to the pipeline.
+    /// Multiple handlers are chained — each sees every request/response.
     pub fn add_http_handler(mut self, handler: impl HttpHandler + 'static) -> Self {
         self.handlers.push(Arc::new(handler));
         self
     }
 
+    /// Set the WebSocket frame handler.
     /// Set the WebSocket frame handler.
     pub fn with_ws_handler(mut self, handler: impl WebSocketHandler + 'static) -> Self {
         self.ws_handler = Some(Arc::new(handler));
@@ -71,6 +86,7 @@ impl ProxyBuilder {
     }
 
     /// Consume the builder and produce a ready-to-start `Proxy`.
+    /// Finalize the builder and produce a [`Proxy`] ready to run.
     pub fn build(self) -> Result<Proxy> {
         let ca = self.ca.unwrap_or_else(CertificationAuthority::new);
 
@@ -101,6 +117,8 @@ impl Default for ProxyBuilder {
 // ── Proxy ──────────────────────────────────────────────────────────
 
 /// A running proxy server.
+/// A fully-assembled proxy ready to listen on a socket.
+/// Created by [`ProxyBuilder::build`].
 pub struct Proxy {
     addr: SocketAddr,
     ca: Arc<CertificationAuthority>,
@@ -139,6 +157,8 @@ impl Proxy {
 
 /// Chains multiple handlers — each sees the output of the previous.
 /// Short-circuit responses stop the chain immediately.
+/// Internal wrapper that chains multiple [`HttpHandler`]s together.
+/// Each request/response flows through every handler in insertion order.
 pub(crate) struct HandlerStack {
     handlers: Vec<Arc<dyn HttpHandler>>,
 }

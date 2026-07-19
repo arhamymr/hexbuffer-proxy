@@ -7,12 +7,15 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 /// Check serialized HTTP request bytes for a WebSocket upgrade.
 #[allow(dead_code)]
+/// Check raw bytes for a WebSocket upgrade request.
+/// Looks for `Upgrade: websocket` and `Connection: upgrade` headers.
 pub(crate) fn is_websocket_upgrade_bytes(raw: &[u8]) -> bool {
     let lower = String::from_utf8_lossy(raw).to_lowercase();
     lower.contains("upgrade:") && lower.contains("websocket")
 }
 
 /// Check a parsed request for a WebSocket upgrade.
+/// Check a typed request for a WebSocket upgrade.
 pub(crate) fn is_websocket_upgrade(req: &Request<Body>) -> bool {
     let is_upgrade = req.headers().get("upgrade")
         .and_then(|v| v.to_str().ok())
@@ -26,6 +29,7 @@ pub(crate) fn is_websocket_upgrade(req: &Request<Body>) -> bool {
 }
 
 /// Check if an HTTP response is a successful WebSocket upgrade (101).
+/// Check whether a response is a successful WebSocket upgrade (status 101).
 pub(crate) fn is_websocket_response(res: &Response<Body>) -> bool {
     res.status() == 101
 }
@@ -33,6 +37,8 @@ pub(crate) fn is_websocket_response(res: &Response<Body>) -> bool {
 /// Bidirectional relay between client and server streams.
 /// Used after a successful WebSocket upgrade (101 response) to pass
 /// raw frames between the client and upstream without closing either side.
+/// Bidirectional raw TCP relay for WebSocket connections.
+/// Copies bytes between client and server bidirectionally.
 pub(crate) async fn relay_websocket<C, S>(
     client: &mut C,
     server: &mut S,
@@ -51,6 +57,10 @@ where
 /// wraps them in `WebSocketStream`, and passes each frame
 /// through the handler via `on_frame` / `on_close`.
 #[allow(dead_code)]
+/// Bidirectional WebSocket frame relay with handler interception.
+///
+/// Reads/writes individual WebSocket frames (not raw bytes) and passes
+/// each frame through the [`WebSocketHandler`] for inspection/modification.
 pub(crate) async fn relay_framed<C, S>(
     client: C,
     server: S,

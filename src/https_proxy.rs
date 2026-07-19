@@ -24,9 +24,15 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 
 /// Handle an HTTPS CONNECT tunnel.
 ///
-/// After TLS decryption the inner HTTP traffic is served by Hyper's
-/// HTTP/1.1 server — no manual request parsing.  This correctly
-/// handles keep-alive, body framing, and pipelining.
+/// **Flow:**
+/// 1. Respond `200 Connection Established` to the browser.
+/// 2. Respect [`HttpHandler::should_intercept_tls`] — if `false`, relay
+///    raw TCP (bypass for cert-pinned domains like `gemini.google.com`).
+/// 3. Forge a per-domain TLS certificate.
+/// 4. Perform TLS handshake with the client using the forged cert.
+/// 5. Wrap the decrypted stream with Hyper's HTTP/1.1 server.
+/// 6. Hyper serves every inner HTTP request (keep-alive, pipelining),
+///    calling [`handle_https_request`] for each one.
 pub(crate) async fn handle_https(
     client_stream: TcpStream,
     ca: Arc<CertificationAuthority>,

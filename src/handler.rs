@@ -11,6 +11,7 @@ use crate::error::Result;
 // ── Context ────────────────────────────────────────────────────────
 
 /// Context available during request/response processing.
+/// Per-request metadata passed through the handler pipeline.
 pub struct HttpContext {
     /// Unique request ID for tracing.
     pub id: u64,
@@ -25,6 +26,9 @@ pub struct HttpContext {
 // ── Body ───────────────────────────────────────────────────────────
 
 /// An HTTP body — either streaming from the upstream or fully buffered.
+/// Unified body type that can represent:
+/// - `Streaming(Incoming)` — a live upstream response body
+/// - `Full(Bytes)` — a pre-buffered body (parsed requests, short-circuit responses)
 pub enum Body {
     Streaming(hyper::body::Incoming),
     Full(Bytes),
@@ -59,6 +63,8 @@ impl From<hyper::body::Incoming> for Body {
 }
 
 /// Create a response body from bytes (short-circuit helpers use this).
+/// Convenience: wrap bytes into a `Full<Bytes>` response body.
+/// Used by handlers that short-circuit with static content.
 pub fn full_body(data: impl Into<Bytes>) -> Full<Bytes> {
     Full::new(data.into())
 }
@@ -67,6 +73,10 @@ pub fn full_body(data: impl Into<Bytes>) -> Full<Bytes> {
 
 /// Returned by `handle_request`. Allows short-circuiting —
 /// return a response immediately without contacting the upstream.
+/// Result of [`HttpHandler::handle_request`].
+///
+/// - `Request` — pass through to upstream
+/// - `Response` — short-circuit (e.g. block, redirect, serve local content)
 pub enum RequestOrResponse {
     Request(Request<Body>),
     Response(Response<Body>),
@@ -77,6 +87,16 @@ pub enum RequestOrResponse {
 /// Handler for HTTP requests and responses.
 /// Called for every intercepted request/response pair.
 #[async_trait]
+/// **Core handler trait** — inspect or mutate HTTP traffic flowing
+/// through the proxy.
+///
+/// ## Lifecycle
+/// 1. [`handle_request`] is called before the proxy contacts the upstream.
+///    Return [`RequestOrResponse::Response`] to short-circuit.
+/// 2. If the request is forwarded, [`handle_response`] is called with
+///    the upstream's reply.
+/// 3. Before a TLS CONNECT tunnel is set up, [`should_intercept_tls`]
+///    is queried — return `false` to relay raw TCP (cert-pinned hosts).
 pub trait HttpHandler: Send + Sync {
     /// Called when a request is intercepted (before forwarding to upstream).
     /// Return `RequestOrResponse::Request(modified)` to forward,
@@ -98,6 +118,11 @@ pub trait HttpHandler: Send + Sync {
     /// Return `false` to skip MITM and relay raw TCP
     /// (e.g. for cert-pinned domains like `gemini.google.com`).
     /// Default: `true` (intercept all).
+    /// Called before a TLS CONNECT tunnel is established.
+    ///
+    /// Return `false` to skip MITM decryption and relay raw TCP bytes
+    /// instead.  Use this for cert-pinned hosts (e.g. `gemini.google.com`)
+    /// that reject locally-forged certificates.
     async fn should_intercept_tls(&self, _host: &str) -> bool {
         true
     }
@@ -141,6 +166,10 @@ pub enum Direction {
 /// Implement this trait to inspect or modify WebSocket traffic
 /// after a successful HTTP upgrade (101 Switching Protocols).
 #[async_trait]
+/// Handler trait for WebSocket frame interception.
+///
+/// Registered via [`ProxyBuilder::with_ws_handler`].  Each WebSocket
+/// message passes through `handle_websocket_message` for inspection.
 pub trait WebSocketHandler: Send + Sync {
     /// Called when a WebSocket upgrade is detected,
     /// before the request is forwarded upstream.

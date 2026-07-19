@@ -13,6 +13,11 @@ use tokio::net::TcpStream;
 use http::Request;
 
 /// Handle a plain HTTP request (non-CONNECT).
+/// Handle a plain (non-CONNECT) HTTP request.
+///
+/// Resolves the target host from the `Host` header or absolute URI,
+/// runs the handler pipeline, and forwards the request upstream
+/// through the pooled Hyper client.
 pub(crate) async fn handle_http(
     mut client_stream: TcpStream,
     handler: Arc<dyn HttpHandler>,
@@ -130,6 +135,9 @@ fn extract_host(req: &Request<Body>, raw: &str) -> anyhow::Result<String> {
 }
 
 #[allow(dead_code)]
+/// Inject or replace `Connection: keep-alive` with `Connection: close`
+/// in raw HTTP/1.1 bytes.  Used to prevent connection reuse issues
+/// with upstream servers that don't support keep-alive well.
 pub(crate) fn force_connection_close_bytes(raw: &[u8]) -> Vec<u8> {
     let modified = String::from_utf8_lossy(raw)
         .replace("keep-alive", "close")
