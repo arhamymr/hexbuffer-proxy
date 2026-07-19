@@ -118,3 +118,54 @@ impl HttpHandler for NoopHandler {
         Ok(response)
     }
 }
+
+// ── WebSocketHandler trait ───────────────────────────────────────
+
+/// Direction of a WebSocket frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    ClientToServer,
+    ServerToClient,
+}
+
+/// Handler for WebSocket frame-level interception.
+///
+/// Implement this trait to inspect or modify WebSocket traffic
+/// after a successful HTTP upgrade (101 Switching Protocols).
+#[async_trait]
+pub trait WebSocketHandler: Send + Sync {
+    /// Called when a WebSocket upgrade is detected,
+    /// before the request is forwarded upstream.
+    async fn on_upgrade(
+        &self,
+        _ctx: &mut HttpContext,
+        request: Request<Body>,
+    ) -> Request<Body> {
+        request
+    }
+
+    /// Called for each WebSocket frame passing through the proxy.
+    /// Return `Some(frame)` to forward, or `None` to drop it.
+    async fn on_frame(
+        &self,
+        _ctx: &mut HttpContext,
+        frame: tokio_tungstenite::tungstenite::Message,
+        _direction: Direction,
+    ) -> Option<tokio_tungstenite::tungstenite::Message> {
+        Some(frame)
+    }
+
+    /// Called when the WebSocket connection closes (either side).
+    async fn on_close(&self, _ctx: &mut HttpContext) {}
+}
+
+/// Re-export tungstenite Message for convenience.
+pub use tokio_tungstenite::tungstenite::Message as WebSocketMessage;
+
+// ── NoopWebSocketHandler ──────────────────────────────────────────
+
+/// A no-op WebSocket handler that passes all frames through unchanged.
+pub struct NoopWebSocketHandler;
+
+#[async_trait]
+impl WebSocketHandler for NoopWebSocketHandler {}

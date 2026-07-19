@@ -10,11 +10,14 @@ pub mod builder;
 mod parser;
 mod proxy;
 mod https_proxy;
+mod ws_proxy;
+mod upstream;
 
 // Re-export public API at crate root
 pub use builder::{ProxyBuilder, Proxy};
 pub use handler::{
     HttpHandler, HttpContext, Body, RequestOrResponse, NoopHandler, full_body,
+    WebSocketHandler, Direction, WebSocketMessage, NoopWebSocketHandler,
 };
 pub use error::{ProxyError, Result};
 pub use ca::CertificationAuthority;

@@ -1,5 +1,5 @@
 use crate::ca::CertificationAuthority;
-use crate::handler::{HttpHandler, HttpContext, RequestOrResponse, Body};
+use crate::handler::{HttpHandler, HttpContext, RequestOrResponse};
 use crate::proxy;
 
 // std
@@ -64,48 +64,61 @@ pub(crate) async fn handle_https(
     };
 
     let request = proxy::parse_raw_request(&inner_buf)?;
+    let is_ws = crate::ws_proxy::is_websocket_upgrade(&request);
 
-    let modified_bytes = match handler.handle_request(&mut ctx, request).await? {
-        RequestOrResponse::Request(req) => proxy::serialize_request(&req),
+    match handler.handle_request(&mut ctx, request).await? {
         RequestOrResponse::Response(res) => {
+            // Short-circuit
             let res_bytes = proxy::serialize_response(&res);
             tls_client.write_all(&res_bytes).await?;
             tls_client.shutdown().await?;
             return Ok(());
         }
-    };
+        RequestOrResponse::Request(req) => {
+            if is_ws {
+                // ── WebSocket: raw TLS upstream relay ──────────
+                let bytes = proxy::serialize_request(&req);
 
-    // Connect to target server via TLS
-    let server_stream = TcpStream::connect(target).await?;
+                let server_stream = TcpStream::connect(target).await?;
+                let root_store = tokio_rustls::rustls::RootCertStore {
+                    roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+                };
+                let tls_config = tokio_rustls::rustls::ClientConfig::builder()
+                    .with_root_certificates(root_store)
+                    .with_no_client_auth();
+                let connector = TlsConnector::from(Arc::new(tls_config));
+                let domain = target_host
+                    .try_into()
+                    .unwrap_or_else(|_| "localhost".try_into().unwrap());
+                let mut server_stream = connector.connect(domain, server_stream).await?;
 
-    let root_store = tokio_rustls::rustls::RootCertStore {
-        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-    };
+                server_stream.write_all(&bytes).await?;
 
-    let tls_config = tokio_rustls::rustls::ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
+                let full_response = proxy::read_full_response(&mut server_stream, buf_size).await?;
+                let response = proxy::parse_raw_response(&full_response)?;
+                let modified_response = handler.handle_response(&mut ctx, response).await?;
+                let final_bytes = proxy::serialize_response(&modified_response);
 
-    let connector = TlsConnector::from(Arc::new(tls_config));
-    let domain = target_host
-        .try_into()
-        .unwrap_or_else(|_| "localhost".try_into().unwrap());
-    let mut server_stream = connector.connect(domain, server_stream).await?;
+                tls_client.write_all(&final_bytes).await?;
+                if crate::ws_proxy::is_websocket_response(&modified_response) {
+                    crate::ws_proxy::relay_websocket(
+                        &mut tls_client, &mut server_stream,
+                    ).await?;
+                } else {
+                    tls_client.shutdown().await?;
+                }
+            } else {
+                // ── Normal HTTPS: Hyper client ────────────────
+                // (connection pooling, HTTP/2, transparent decompression)
+                let response = crate::upstream::send_request(req).await?;
+                let modified_response = handler.handle_response(&mut ctx, response).await?;
+                let final_bytes = proxy::serialize_response(&modified_response);
 
-    // Force Connection: close so read doesn't hang on keep-alive
-    let forward_bytes = proxy::force_connection_close_bytes(&modified_bytes);
-    server_stream.write_all(&forward_bytes).await?;
-
-    // Read response from upstream
-    let full_response = proxy::read_full_response(&mut server_stream, buf_size).await?;
-
-    // ── handler: response ───────────────────────────────────────────
-    let response = proxy::parse_raw_response(&full_response)?;
-    let modified_response = handler.handle_response(&mut ctx, response).await?;
-    let final_bytes = proxy::serialize_response(&modified_response);
-
-    tls_client.write_all(&final_bytes).await?;
-    tls_client.shutdown().await?;
+                tls_client.write_all(&final_bytes).await?;
+                tls_client.shutdown().await?;
+            }
+        }
+    }
 
     Ok(())
 }

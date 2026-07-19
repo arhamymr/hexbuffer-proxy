@@ -5,7 +5,6 @@ use crate::handler::{HttpHandler, HttpContext, RequestOrResponse, Body};
 // std
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::net::SocketAddr;
 
 // tokio
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
@@ -52,11 +51,6 @@ pub(crate) async fn handle_client(
 
         // Resolve target from Host header or absolute URI
         let host = extract_host(&request, &request_str)?;
-        let target = if host.contains(':') {
-            host.clone()
-        } else {
-            format!("{}:80", host)
-        };
 
         // Handler: request
         let req_id = REQUEST_ID.fetch_add(1, Ordering::SeqCst);
@@ -67,31 +61,53 @@ pub(crate) async fn handle_client(
             is_https: false,
         };
 
-        let modified_bytes = match handler.handle_request(&mut ctx, request).await? {
-            RequestOrResponse::Request(req) => serialize_request(&req),
+        let is_ws = crate::ws_proxy::is_websocket_upgrade(&request);
+
+        match handler.handle_request(&mut ctx, request).await? {
             RequestOrResponse::Response(res) => {
+                // Short-circuit — respond without contacting upstream
                 let res_bytes = serialize_response(&res);
                 client_stream.write_all(&res_bytes).await?;
                 client_stream.shutdown().await?;
                 return Ok(());
             }
-        };
+            RequestOrResponse::Request(req) => {
+                if is_ws {
+                    // ── WebSocket: raw TCP relay ──────────────
+                    let bytes = serialize_request(&req);
+                    let target = if host.contains(':') {
+                        host.clone()
+                    } else {
+                        format!("{}:80", host)
+                    };
+                    let mut server_stream = TcpStream::connect(&target).await?;
+                    server_stream.write_all(&bytes).await?;
 
-        // Connect upstream (plain TCP, no TLS)
-        let mut server_stream = TcpStream::connect(&target).await?;
-        let forward_bytes = force_connection_close_bytes(&modified_bytes);
-        server_stream.write_all(&forward_bytes).await?;
+                    let full_response = read_full_response(&mut server_stream, buf_size).await?;
+                    let response = parse_raw_response(&full_response)?;
+                    let modified_response = handler.handle_response(&mut ctx, response).await?;
+                    let final_bytes = serialize_response(&modified_response);
 
-        // Read response
-        let full_response = read_full_response(&mut server_stream, buf_size).await?;
+                    client_stream.write_all(&final_bytes).await?;
+                    if crate::ws_proxy::is_websocket_response(&modified_response) {
+                        crate::ws_proxy::relay_websocket(
+                            &mut client_stream, &mut server_stream,
+                        ).await?;
+                    } else {
+                        client_stream.shutdown().await?;
+                    }
+                } else {
+                    // ── Normal HTTP: Hyper client ─────────────
+                    // (connection pooling, HTTP/2, transparent decompression)
+                    let response = crate::upstream::send_request(req).await?;
+                    let modified_response = handler.handle_response(&mut ctx, response).await?;
+                    let final_bytes = serialize_response(&modified_response);
 
-        // Handler: response
-        let response = parse_raw_response(&full_response)?;
-        let modified_response = handler.handle_response(&mut ctx, response).await?;
-        let final_bytes = serialize_response(&modified_response);
-
-        client_stream.write_all(&final_bytes).await?;
-        client_stream.shutdown().await?;
+                    client_stream.write_all(&final_bytes).await?;
+                    client_stream.shutdown().await?;
+                }
+            }
+        }
     }
 
     Ok(())
@@ -128,50 +144,39 @@ pub(crate) fn parse_raw_request(raw: &[u8]) -> anyhow::Result<Request<Body>> {
     let mut parts = req_line.split_whitespace();
     let method = parts.next().unwrap_or("GET");
     let uri = parts.next().unwrap_or("/");
+    let _version = parts.next().unwrap_or("HTTP/1.1");
 
     let mut builder = Request::builder().method(method).uri(uri);
 
     // headers
-    for line in lines.by_ref() {
+    for line in &mut lines {
         if line.is_empty() {
-            break; // end of headers
+            break;
         }
-        if let Some((key, val)) = line.split_once(':') {
-            builder = builder.header(key.trim(), val.trim());
+        if let Some((key, value)) = line.split_once(':') {
+            builder = builder.header(key.trim(), value.trim());
         }
     }
 
-    // body: everything after \r\n\r\n
-    let header_end = raw
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .map(|i| i + 4)
-        .unwrap_or(raw.len());
-
-    let body_bytes = bytes::Bytes::copy_from_slice(&raw[header_end..]);
-
-    Ok(builder.body(Body::Full(body_bytes))?)
+    Ok(builder.body(Body::Full(bytes::Bytes::new())).unwrap())
 }
 
 pub(crate) fn serialize_request(req: &Request<Body>) -> Vec<u8> {
-    let mut out = Vec::new();
+    let mut out = format!(
+        "{} {} HTTP/1.1\r\n",
+        req.method(),
+        req.uri()
+    ).into_bytes();
 
-    // request line
-    out.extend_from_slice(req.method().as_str().as_bytes());
-    out.push(b' ');
-    out.extend_from_slice(req.uri().to_string().as_bytes());
-    out.extend_from_slice(b" HTTP/1.1\r\n");
-
-    // headers
-    for (name, val) in req.headers() {
-        out.extend_from_slice(name.as_str().as_bytes());
+    for (key, value) in req.headers() {
+        out.extend_from_slice(key.as_str().as_bytes());
         out.extend_from_slice(b": ");
-        out.extend_from_slice(val.as_bytes());
+        out.extend_from_slice(value.as_bytes());
         out.extend_from_slice(b"\r\n");
     }
     out.extend_from_slice(b"\r\n");
 
-    // body
+    // Append body
     if let Body::Full(bytes) = req.body() {
         out.extend_from_slice(bytes);
     }
@@ -183,52 +188,38 @@ pub(crate) fn parse_raw_response(raw: &[u8]) -> anyhow::Result<Response<Body>> {
     let text = String::from_utf8_lossy(raw);
     let mut lines = text.lines();
 
-    // status line: "HTTP/1.1 200 OK"
-    let status_line = lines.next().unwrap_or("");
-    let code: u16 = status_line
-        .split_whitespace()
-        .nth(1)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(502);
+    // status line
+    let status_line = lines.next().unwrap_or("HTTP/1.1 200 OK");
+    let mut parts = status_line.split_whitespace();
+    let _version = parts.next().unwrap_or("HTTP/1.1");
+    let status: u16 = parts.next().unwrap_or("200").parse()?;
 
-    let mut builder = Response::builder().status(code);
+    let mut builder = Response::builder().status(status);
 
     // headers
-    for line in lines.by_ref() {
+    for line in &mut lines {
         if line.is_empty() {
             break;
         }
-        if let Some((key, val)) = line.split_once(':') {
-            builder = builder.header(key.trim(), val.trim());
+        if let Some((key, value)) = line.split_once(':') {
+            builder = builder.header(key.trim(), value.trim());
         }
     }
 
-    let header_end = raw
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .map(|i| i + 4)
-        .unwrap_or(raw.len());
-
-    let body_bytes = bytes::Bytes::copy_from_slice(&raw[header_end..]);
-
-    Ok(builder.body(Body::Full(body_bytes))?)
+    Ok(builder.body(Body::Full(bytes::Bytes::new())).unwrap())
 }
 
 pub(crate) fn serialize_response(res: &Response<Body>) -> Vec<u8> {
-    let mut out = Vec::new();
+    let mut out = format!(
+        "HTTP/1.1 {} {}\r\n",
+        res.status().as_u16(),
+        res.status().canonical_reason().unwrap_or("OK")
+    ).into_bytes();
 
-    // status line
-    let code = res.status();
-    out.extend_from_slice(
-        format!("HTTP/1.1 {} {}\r\n", code.as_u16(), code.canonical_reason().unwrap_or(""))
-            .as_bytes(),
-    );
-
-    // headers
-    for (name, val) in res.headers() {
-        out.extend_from_slice(name.as_str().as_bytes());
+    for (key, value) in res.headers() {
+        out.extend_from_slice(key.as_str().as_bytes());
         out.extend_from_slice(b": ");
-        out.extend_from_slice(val.as_bytes());
+        out.extend_from_slice(value.as_bytes());
         out.extend_from_slice(b"\r\n");
     }
     out.extend_from_slice(b"\r\n");
@@ -240,12 +231,11 @@ pub(crate) fn serialize_response(res: &Response<Body>) -> Vec<u8> {
     out
 }
 
+#[allow(dead_code)]
 pub(crate) fn force_connection_close_bytes(raw: &[u8]) -> Vec<u8> {
-    let text = String::from_utf8_lossy(raw);
-
-    let modified = text
-        .replace("Connection: keep-alive", "Connection: close")
-        .replace("Connection: Keep-Alive", "Connection: close");
+    let modified = String::from_utf8_lossy(raw)
+        .replace("keep-alive", "close")
+        .replace("Keep-Alive", "close");
 
     if modified.contains("Connection: close") {
         modified.into_bytes()
@@ -323,6 +313,10 @@ async fn read_http_body<R: AsyncRead + Unpin>(
     initial: Vec<u8>,
     buf_size: usize,
 ) -> anyhow::Result<Vec<u8>> {
+    // 101 Switching Protocols, 204 No Content, 304 Not Modified have no body
+    if is_no_body_status(headers) {
+        return Ok(Vec::new());
+    }
     if is_chunked(headers) {
         read_chunked_body(stream, initial, buf_size).await
     } else if let Some(len) = get_content_length(headers) {
@@ -330,6 +324,16 @@ async fn read_http_body<R: AsyncRead + Unpin>(
     } else {
         read_until_close(stream, initial, buf_size).await
     }
+}
+
+fn is_no_body_status(headers: &str) -> bool {
+    headers
+        .lines()
+        .next()
+        .and_then(|status_line| status_line.split_whitespace().nth(1))
+        .and_then(|code| code.parse::<u16>().ok())
+        .map(|code| matches!(code, 101 | 204 | 304))
+        .unwrap_or(false)
 }
 
 async fn read_chunked_body<R: AsyncRead + Unpin>(

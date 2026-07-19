@@ -59,8 +59,10 @@ src/
 ├── ca.rs          # Certificate authority — generates CA & per-domain TLS certs (rcgen)
 ├── proxy.rs       # Request dispatcher — routes CONNECT vs plain HTTP, shared helpers
 ├── https_proxy.rs # HTTPS MITM — TLS interception, cert forging, handler pipeline
+├── ws_proxy.rs    # WebSocket — upgrade detection, bidirectional relay, frame handler
+├── upstream.rs    # Hyper client — connection pooling, HTTP/2 ALPN, body decompression
 ├── parser.rs      # CONNECT request line parser — extracts host:port
-├── handler.rs     # HttpHandler trait, Body, HttpContext, RequestOrResponse, NoopHandler
+├── handler.rs     # HttpHandler + WebSocketHandler traits, Body, HttpContext, Direction
 ├── builder.rs     # ProxyBuilder — ergonomic proxy configuration
 └── error.rs       # Centralized ProxyError enum (thiserror)
 ```
@@ -88,16 +90,18 @@ Preferences → Privacy & Security → Certificates → View Certificates → Au
 - ✅ **Handler pipeline** — parse → handler stack → serialize integrated into proxy flow
 - ✅ **Short-circuit support** — return responses without contacting upstream
 - ✅ **Library + binary split** — `lib.rs` with `pub(crate)` visibility, thin `main.rs`
-- ✅ **Module separation** — `https_proxy.rs` extracted from `proxy.rs`
+- ✅ **Module separation** — `https_proxy.rs` + `ws_proxy.rs` + `upstream.rs` extracted
+- ✅ **Streaming body support** — Content-Length, chunked transfer encoding, Connection: close
+- ✅ **WebSocket support** — upgrade detection, bidirectional relay, `WebSocketHandler` trait
+- ✅ **Upstream connection pooling** — Hyper client with `LazyLock`-shared pool, HTTP/2 ALPN
+- ✅ **Transparent body decompression** — gzip, deflate, brotli, zstd decoded automatically
 - ✅ Unit test coverage for builder, handler stack, and core modules
 
 ## Future Planning
 
 See [docs/plan.md](docs/plan.md) for the full roadmap. Planned features:
 
-- **WebSocket support** — intercept and relay WebSocket frames with message modification
-- **HTTP/2 support** — optional feature-gated HTTP/2 proxying
-- **Body decoding helpers** — decode gzip/deflate/brotli/zstd compressed bodies
+- **Body decoding helpers for request bodies** — decompress client→proxy payloads
 - **Persistent connections** — HTTP/1.1 keep-alive across multiple requests per tunnel
 
 ## Tech Stack
@@ -108,9 +112,11 @@ See [docs/plan.md](docs/plan.md) for the full roadmap. Planned features:
 | `tokio-rustls` / `rustls` | TLS client/server handshakes |
 | `rcgen` | CA and per-domain certificate generation |
 | `webpki-roots` | Trusted root CA store for upstream connections |
-| `hyper` / `http` | HTTP types and parsing |
+| `hyper` / `http` / `hyper-util` | HTTP types, parsing, connection pooling |
+| `hyper-rustls` | TLS connector for upstream Hyper client (ALPN, HTTP/2) |
 | `async-trait` | Async trait dynamic dispatch |
 | `thiserror` | Ergonomic error types |
 | `bytes` | Zero-copy byte buffers |
-| `thiserror` | Ergonomic error types |
-| `bytes` | Zero-copy byte buffers |
+| `tokio-tungstenite` | WebSocket frame parsing and relay |
+| `futures-util` | Stream/Sink combinators for WebSocket frames |
+| `flate2` / `brotli` / `zstd` | Transparent response body decompression |

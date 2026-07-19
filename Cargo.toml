@@ -24,3 +24,15 @@ thiserror = "2"
 
 # Async traits
 async-trait = "0.1"
+
+# WebSocket
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+
+# Upstream Hyper client (connection pooling, HTTP/2, ALPN)
+hyper-rustls = { version = "0.27", features = ["http2", "webpki-roots", "native-tokio"] }
+
+# Body decompression (gzip, deflate, brotli, zstd)
+flate2 = "1"
+brotli = "7"
+zstd = "0.13"
