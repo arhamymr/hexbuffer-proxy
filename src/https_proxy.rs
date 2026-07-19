@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 // tokio
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio_rustls::{
     TlsAcceptor, TlsConnector,
@@ -65,10 +65,8 @@ pub(crate) async fn handle_https(
     let acceptor = TlsAcceptor::from(Arc::new(server_config));
     let mut tls_client = acceptor.accept(client).await?;
 
-    // Read the true inner decrypted payload
-    let mut inner_buf = vec![0; buf_size];
-    let bytes_read = tls_client.read(&mut inner_buf).await?;
-    inner_buf.truncate(bytes_read);
+    // Read the true inner decrypted payload (complete, with body)
+    let inner_buf = proxy::read_full_response(&mut tls_client, buf_size).await?;
 
     // ── handler: request ────────────────────────────────────────────
     let req_id = proxy::REQUEST_ID.fetch_add(1, Ordering::SeqCst);

@@ -246,6 +246,11 @@ async fn read_http_body<R: AsyncRead + Unpin>(
     if is_no_body_status(headers) {
         return Ok(Vec::new());
     }
+    // Request with no Content-Length and no chunked → empty body.
+    // (e.g. GET, HEAD, DELETE). Only responses use connection-close for body delimiting.
+    if is_request(headers) && !is_chunked(headers) && get_content_length(headers).is_none() {
+        return Ok(initial);
+    }
     if is_chunked(headers) {
         read_chunked_body(stream, initial, buf_size).await
     } else if let Some(len) = get_content_length(headers) {
@@ -262,6 +267,12 @@ fn is_no_body_status(headers: &str) -> bool {
         .and_then(|status_line| status_line.split_whitespace().nth(1))
         .and_then(|code| code.parse::<u16>().ok())
         .map(|code| matches!(code, 101 | 204 | 304))
+        .unwrap_or(false)
+}
+
+fn is_request(headers: &str) -> bool {
+    !headers.lines().next()
+        .map(|l| l.starts_with("HTTP/"))
         .unwrap_or(false)
 }
 

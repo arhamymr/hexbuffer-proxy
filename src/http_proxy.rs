@@ -25,7 +25,14 @@ pub(crate) async fn handle_http(
     let request = proxy::parse_raw_request(request_bytes)?;
 
     // Resolve target from Host header or absolute URI
-    let host = extract_host(&request, &request_str)?;
+    let host = match extract_host(&request, &request_str) {
+        Ok(h) => h,
+        Err(_) => {
+            client_stream.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await?;
+            client_stream.shutdown().await?;
+            return Ok(());
+        }
+    };
 
     // Handler: request
     let req_id = proxy::REQUEST_ID.fetch_add(1, Ordering::SeqCst);

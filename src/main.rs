@@ -241,14 +241,14 @@ async fn main() -> anyhow::Result<()> {
         .with_ca(ca)
         .with_http_handler(LoggingHandler::new())
         .add_http_handler(PassthroughHandler {
-            passthrough: vec!["gemini.google.com".into()],
-        })
-        .add_http_handler(BlocklistHandler {
-            blocked: vec![
+            passthrough: vec![
                 "doubleclick.net".into(),
                 "google-analytics.com".into(),
                 "googletagmanager.com".into(),
             ],
+        })
+        .add_http_handler(BlocklistHandler {
+            blocked: vec![],
         })
         .with_ws_handler(WsLogger)
         .build()?;
