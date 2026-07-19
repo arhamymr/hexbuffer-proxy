@@ -60,7 +60,7 @@ src/
 ├── proxy.rs       # Request dispatcher — routes CONNECT vs plain HTTP, shared helpers
 ├── https_proxy.rs # HTTPS MITM — TLS interception, cert forging, handler pipeline
 ├── ws_proxy.rs    # WebSocket — upgrade detection, bidirectional relay, frame handler
-├── upstream.rs    # Hyper client — connection pooling, HTTP/2 ALPN, body decompression
+├── upstream.rs    # Tower service stack — Hyper client + DecompressionLayer, HTTP/2 ALPN
 ├── parser.rs      # CONNECT request line parser — extracts host:port
 ├── handler.rs     # HttpHandler + WebSocketHandler traits, Body, HttpContext, Direction
 ├── builder.rs     # ProxyBuilder — ergonomic proxy configuration
@@ -94,7 +94,7 @@ Preferences → Privacy & Security → Certificates → View Certificates → Au
 - ✅ **Streaming body support** — Content-Length, chunked transfer encoding, Connection: close
 - ✅ **WebSocket support** — upgrade detection, bidirectional relay, `WebSocketHandler` trait
 - ✅ **Upstream connection pooling** — Hyper client with `LazyLock`-shared pool, HTTP/2 ALPN
-- ✅ **Transparent body decompression** — gzip, deflate, brotli, zstd decoded automatically
+- ✅ **Tower middleware decompression** — gzip, deflate, brotli, zstd via tower-http DecompressionLayer
 - ✅ Unit test coverage for builder, handler stack, and core modules
 
 ## Future Planning
@@ -119,4 +119,4 @@ See [docs/plan.md](docs/plan.md) for the full roadmap. Planned features:
 | `bytes` | Zero-copy byte buffers |
 | `tokio-tungstenite` | WebSocket frame parsing and relay |
 | `futures-util` | Stream/Sink combinators for WebSocket frames |
-| `flate2` / `brotli` / `zstd` | Transparent response body decompression |
+| `tower` / `tower-http` | Middleware stack — DecompressionLayer for transparent body decoding |
