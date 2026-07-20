@@ -97,13 +97,6 @@ Preferences → Privacy & Security → Certificates → View Certificates → Au
 - ✅ **Tower middleware decompression** — gzip, deflate, brotli, zstd via tower-http DecompressionLayer
 - ✅ Unit test coverage for builder, handler stack, and core modules
 
-## Future Planning
-
-See [docs/plan.md](docs/plan.md) for the full roadmap. Planned features:
-
-- **Body decoding helpers for request bodies** — decompress client→proxy payloads
-- **Persistent connections** — HTTP/1.1 keep-alive across multiple requests per tunnel
-
 ## Tech Stack
 
 | Dependency | Purpose |
