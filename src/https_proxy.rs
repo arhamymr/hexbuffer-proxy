@@ -11,7 +11,7 @@ use std::sync::atomic::Ordering;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio_rustls::{
-    TlsAcceptor, TlsConnector,
+    TlsAcceptor,
     rustls::{ServerConfig, pki_types::{CertificateDer, PrivateKeyDer}}
 };
 
@@ -105,7 +105,7 @@ pub(crate) async fn handle_https(
 /// Process a single HTTP request from the decrypted TLS stream.
 /// Called by Hyper's server for each request (keep-alive supported).
 async fn handle_https_request(
-    req: Request<hyper::body::Incoming>,
+    mut req: Request<hyper::body::Incoming>,
     handler: Arc<dyn HttpHandler>,
     ws_handler: Option<Arc<dyn WebSocketHandler>>,
     target_host: &str,
@@ -118,6 +118,16 @@ async fn handle_https_request(
         host: target_host.to_string(),
         client_addr,
         is_https: true,
+    };
+
+    // Detect WebSocket upgrade BEFORE body conversion so we can
+    // grab hyper::upgrade::on(&mut req) — needed for Hyper to hand us
+    // the raw stream after the 101 response.
+    let is_ws = crate::ws_proxy::is_websocket_upgrade_headers(req.headers());
+    let on_upgrade = if is_ws {
+        Some(hyper::upgrade::on(&mut req))
+    } else {
+        None
     };
 
     // Convert Incoming body → our Body type
@@ -133,9 +143,9 @@ async fn handle_https_request(
 
         Ok(RequestOrResponse::Request(mut req)) => {
             // WebSocket upgrade — relay
-            if crate::ws_proxy::is_websocket_upgrade(&req) {
-                return handle_https_websocket(
-                    req, handler, ws_handler, &mut ctx, target_host, target,
+            if let Some(on_upgrade) = on_upgrade {
+                return crate::ws_proxy::handle_https_websocket(
+                    req, on_upgrade, handler, ws_handler, &mut ctx, target_host, target,
                 ).await;
             }
 
@@ -168,41 +178,4 @@ async fn handle_https_request(
                 .unwrap())
         }
     }
-}
-
-/// Handle a WebSocket upgrade inside the TLS tunnel.
-async fn handle_https_websocket(
-    req: Request<Body>,
-    handler: Arc<dyn HttpHandler>,
-    _ws_handler: Option<Arc<dyn WebSocketHandler>>,
-    ctx: &mut HttpContext,
-    target_host: &str,
-    target: &str,
-) -> Result<Response<Full<Bytes>>, anyhow::Error> {
-    let bytes = proxy::serialize_request(&req);
-
-    let server_stream = TcpStream::connect(target).await?;
-    let root_store = tokio_rustls::rustls::RootCertStore {
-        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-    };
-    let tls_config = tokio_rustls::rustls::ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
-    let connector = TlsConnector::from(Arc::new(tls_config));
-    let host = target_host.to_string();
-    let domain: tokio_rustls::rustls::pki_types::ServerName = host
-        .try_into()
-        .unwrap_or_else(|_| "localhost".try_into().unwrap());
-    let mut server_stream = connector.connect(domain, server_stream).await?;
-
-    server_stream.write_all(&bytes).await?;
-
-    let full_response = proxy::read_full_response(&mut server_stream, 16384).await?;
-    let response = proxy::parse_raw_response(&full_response)?;
-    let modified = handler.handle_response(ctx, response).await
-        .map_err(|e| anyhow::anyhow!("[ws] response handler: {e}"))?;
-
-    let (parts, body) = modified.into_parts();
-    let bytes = body.into_bytes().await?;
-    Ok(Response::from_parts(parts, Full::new(bytes)))
 }
