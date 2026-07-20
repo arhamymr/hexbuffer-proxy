@@ -12,7 +12,7 @@ use rcgen::{
 };
 
 use std::collections::HashMap;
-use std::sync::{Mutex};
+use std::sync::RwLock;
 use std::io::Write;
 use std::io::Read;
 use std::fs::File;
@@ -30,7 +30,7 @@ pub struct CertificationAuthority {
     ca_params: CertificateParams,
     ca_cert: Certificate,
     ca_key: KeyPair,
-    cert_cache: Mutex<HashMap<String, (Vec<u8>, Vec<u8>)>>,
+    cert_cache: RwLock<HashMap<String, (Vec<u8>, Vec<u8>)>>,
 }
 
 impl CertificationAuthority {
@@ -65,7 +65,7 @@ impl CertificationAuthority {
                 ca_params: params,
                 ca_cert,
                 ca_key,
-                cert_cache: Mutex::new(HashMap::new()),
+                cert_cache: RwLock::new(HashMap::new()),
             }
         }
 
@@ -78,7 +78,7 @@ impl CertificationAuthority {
             ca_params: params.clone(),
             ca_cert,
             ca_key,
-            cert_cache: Mutex::new(HashMap::new()),
+            cert_cache: RwLock::new(HashMap::new()),
         };
 
         // ensure cert directory exists before saving
@@ -135,14 +135,12 @@ impl CertificationAuthority {
     }
 
     /// Generate (or retrieve from cache) a TLS certificate for `host`.
-///
-/// Returns `(cert_der, key_der)` — raw DER-encoded certificate and
-/// private key.  Results are cached per host to avoid redundant
-/// key generation on repeated connections.
-pub fn forge_certificate(&self, host: &str) -> (Vec<u8>, Vec<u8>) {
-        let mut cache = self.cert_cache.lock().unwrap();
-
-        if let Some(cert) = cache.get(host) {
+    ///
+    /// Returns `(cert_der, key_der)` — raw DER-encoded certificate and
+    /// private key.  Results are cached per host to avoid redundant
+    /// key generation on repeated connections.
+    pub fn forge_certificate(&self, host: &str) -> (Vec<u8>, Vec<u8>) {
+        if let Some(cert) = self.cert_cache.read().unwrap().get(host) {
             return cert.clone();
         }
 
@@ -169,7 +167,10 @@ pub fn forge_certificate(&self, host: &str) -> (Vec<u8>, Vec<u8>) {
         let cert_der = site_cert.der().to_vec();
         let private_key_der = site_key.serialized_der().to_vec();
 
-        cache.insert(host.to_string(), (cert_der.clone(), private_key_der.clone()));
+        self.cert_cache
+            .write()
+            .unwrap()
+            .insert(host.to_string(), (cert_der.clone(), private_key_der.clone()));
 
         (cert_der, private_key_der)
     }

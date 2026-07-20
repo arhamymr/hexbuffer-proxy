@@ -15,7 +15,7 @@ use tokio_rustls::{
     rustls::{ServerConfig, pki_types::{CertificateDer, PrivateKeyDer}}
 };
 
-// hyper — HTTP/1.1 server on decrypted TLS stream (Hudsucker pattern)
+// hyper — HTTP/1.1 server on decrypted TLS stream
 use bytes::Bytes;
 use hyper::service::service_fn;
 use hyper::{Request, Response};
