@@ -1,18 +1,15 @@
 // ws_proxy.rs — WebSocket upgrade detection, upgrade handshake, and bidirectional relay
 use crate::handler::{Body, Direction, HttpContext, HttpHandler, WebSocketHandler};
-use crate::proxy;
 
 use anyhow;
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use http::{Request, Response};
 use http_body_util::Full;
-use hyper::upgrade::OnUpgrade;
-use hyper_util::rt::TokioIo;
+use hyper_tungstenite;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
-use tokio::net::TcpStream;
-use tokio_rustls::TlsConnector;
+use tokio_tungstenite::tungstenite::Message;
 
 /// Check serialized HTTP request bytes for a WebSocket upgrade.
 #[allow(dead_code)]
@@ -41,20 +38,6 @@ pub(crate) fn is_websocket_upgrade(req: &Request<Body>) -> bool {
 /// Check whether a response is a successful WebSocket upgrade (status 101).
 pub(crate) fn is_websocket_response(res: &Response<Body>) -> bool {
     res.status() == 101
-}
-
-/// Check request headers for a WebSocket upgrade (body-type agnostic).
-/// Used before body conversion to grab `hyper::upgrade::on(&mut req)`.
-pub(crate) fn is_websocket_upgrade_headers(headers: &hyper::HeaderMap) -> bool {
-    let is_upgrade = headers.get("upgrade")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.to_lowercase().contains("websocket"))
-        .unwrap_or(false);
-    let connection_upgrade = headers.get("connection")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.to_lowercase().contains("upgrade"))
-        .unwrap_or(false);
-    is_upgrade && connection_upgrade
 }
 
 /// Bidirectional relay between client and server streams.
@@ -141,91 +124,184 @@ where
     Ok(())
 }
 
-/// Handle a WebSocket upgrade inside the TLS tunnel using Hyper's upgrade mechanism.
+/// Handle a WebSocket upgrade inside the TLS tunnel.
 ///
-/// Forwards the upgrade request to the upstream, gets the 101 response,
-/// then uses Hyper's HTTP upgrade to take over the raw client stream for
-/// bidirectional WebSocket frame relay.
+/// Uses [`hyper_tungstenite::upgrade`] to perform the WebSocket handshake
+/// within Hyper's HTTP server, then connects to the upstream via
+/// [`tokio_tungstenite::connect_async_tls_with_config`] and relays frames
+/// bidirectionally.
 pub(crate) async fn handle_https_websocket(
-    req: Request<Body>,
-    on_upgrade: OnUpgrade,
-    handler: Arc<dyn HttpHandler>,
+    mut req: Request<Body>,
+    _handler: Arc<dyn HttpHandler>,
     ws_handler: Option<Arc<dyn WebSocketHandler>>,
     ctx: &mut HttpContext,
     target_host: &str,
-    target: &str,
 ) -> Result<Response<Full<Bytes>>, anyhow::Error> {
-    let bytes = proxy::serialize_request(&req);
-
-    // 1. Connect to upstream over TLS
-    let server_stream = TcpStream::connect(target).await?;
-    let root_store = tokio_rustls::rustls::RootCertStore {
-        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-    };
-    let tls_config = tokio_rustls::rustls::ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
-    let connector = TlsConnector::from(Arc::new(tls_config));
-    let host = target_host.to_string();
-    let domain: tokio_rustls::rustls::pki_types::ServerName = host
-        .try_into()
-        .unwrap_or_else(|_| "localhost".try_into().unwrap());
-    let mut server_stream = connector.connect(domain, server_stream).await?;
-
-    // 2. Forward the upgrade request
-    server_stream.write_all(&bytes).await?;
-
-    // 3. Read the upstream response
-    let full_response = proxy::read_full_response(&mut server_stream, 16384).await?;
-    let response = proxy::parse_raw_response(&full_response)?;
-    let modified = handler.handle_response(ctx, response).await
-        .map_err(|e| anyhow::anyhow!("[ws] response handler: {e}"))?;
-
-    // 4. If upstream didn't upgrade, return response as-is
-    if modified.status() != 101 {
-        let (parts, body) = modified.into_parts();
-        let bytes = body.into_bytes().await?;
-        return Ok(Response::from_parts(parts, Full::new(bytes)));
+    // 1. Make URI absolute if needed and rewrite scheme: https → wss
+    if req.uri().scheme().is_none() {
+        let uri: http::Uri = format!("https://{}{}", target_host, req.uri())
+            .parse()
+            .map_err(|e| anyhow::anyhow!("[ws] invalid absolute URI: {e}"))?;
+        *req.uri_mut() = uri;
+    }
+    {
+        let uri = req.uri().clone();
+        let mut parts = uri.into_parts();
+        parts.scheme = Some(
+            http::uri::Scheme::try_from("wss")
+                .map_err(|e| anyhow::anyhow!("[ws] scheme error: {e}"))?,
+        );
+        let new_uri = http::Uri::from_parts(parts)
+            .map_err(|e| anyhow::anyhow!("[ws] invalid URI: {e}"))?;
+        *req.uri_mut() = new_uri;
     }
 
-    // 5. Build the 101 response for the client
-    let mut response_builder = Response::builder().status(101);
-    for (key, value) in modified.headers() {
+    // 2. Upgrade client side via hyper_tungstenite
+    let (res, ws_fut) = hyper_tungstenite::upgrade(&mut req, None)
+        .map_err(|e| anyhow::anyhow!("[ws] upgrade failed: {e}"))?;
+
+    // 3. Build 101 response for the client (body is always empty)
+    let mut response_builder = Response::builder().status(res.status());
+    for (key, value) in res.headers() {
         response_builder = response_builder.header(key, value);
     }
-    let res = response_builder.body(Full::new(Bytes::new()))?;
+    let client_res = response_builder.body(Full::new(Bytes::new()))?;
 
-    // 6. Spawn the WebSocket relay task.
-    //    on_upgrade resolves when Hyper hands us the raw client stream.
+    // 4. Spawn relay task — connects to upstream and relays frames
     let ctx_id = ctx.id;
     let ctx_host = ctx.host.clone();
+    let upgrade_req = req.map(|_| ()); // strip body for tokio_tungstenite
     tokio::spawn(async move {
-        match on_upgrade.await {
-            Ok(upgraded) => {
-                let mut client = TokioIo::new(upgraded);
-                if let Some(ws) = ws_handler {
-                    let mut relay_ctx = HttpContext {
-                        id: ctx_id,
-                        host: ctx_host,
-                        client_addr: "0.0.0.0:0".parse().unwrap(),
-                        is_https: true,
-                    };
-                    let _ = relay_framed(
-                        client, server_stream, ws, &mut relay_ctx,
-                    ).await;
-                } else {
-                    let _ = relay_websocket(
-                        &mut client, &mut server_stream,
-                    ).await;
+        match ws_fut.await {
+            Ok(client_ws) => {
+                let connector = tokio_tungstenite::Connector::Rustls(Arc::new({
+                    let roots = tokio_rustls::rustls::RootCertStore::from_iter(
+                        webpki_roots::TLS_SERVER_ROOTS.iter().cloned(),
+                    );
+                    tokio_rustls::rustls::ClientConfig::builder()
+                        .with_root_certificates(roots)
+                        .with_no_client_auth()
+                }));
+
+                match tokio_tungstenite::connect_async_tls_with_config(
+                    upgrade_req, None, false, Some(connector),
+                ).await {
+                    Ok((server_ws, _)) => {
+                        if let Some(ws) = ws_handler {
+                            let mut relay_ctx = HttpContext {
+                                id: ctx_id,
+                                host: ctx_host,
+                                client_addr: "0.0.0.0:0".parse().unwrap(),
+                                is_https: true,
+                            };
+                            let _ = relay_upgraded(client_ws, server_ws, ws, &mut relay_ctx).await;
+                        } else {
+                            let _ = relay_raw_upgraded(client_ws, server_ws).await;
+                        }
+                    }
+                    Err(e) => eprintln!("[ws] upstream connect error: {e}"),
                 }
             }
-            Err(e) => {
-                eprintln!("[ws] upgrade error: {e}");
-            }
+            Err(e) => eprintln!("[ws] upgrade error: {e}"),
         }
     });
 
-    Ok(res)
+    Ok(client_res)
+}
+
+/// Bidirectional WebSocket frame relay for already-upgraded streams.
+///
+/// Splits each [`WebSocketStream`] into sink + stream halves and relays
+/// frames through the handler's [`on_frame`] / [`on_close`] callbacks.
+async fn relay_upgraded<A, B>(
+    client: A,
+    server: B,
+    handler: Arc<dyn WebSocketHandler>,
+    ctx: &mut HttpContext,
+) -> anyhow::Result<()>
+where
+    A: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
+        + futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
+        + Unpin,
+    B: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
+        + futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
+        + Unpin,
+{
+    let (mut client_sink, mut client_stream) = client.split();
+    let (mut server_sink, mut server_stream) = server.split();
+
+    loop {
+        tokio::select! {
+            msg = client_stream.next() => {
+                match msg {
+                    Some(Ok(msg)) => {
+                        let is_close = msg.is_close();
+                        if let Some(msg) = handler.on_frame(ctx, msg, Direction::ClientToServer).await {
+                            let _ = server_sink.send(msg).await;
+                        }
+                        if is_close { break; }
+                    }
+                    _ => break,
+                }
+            }
+            msg = server_stream.next() => {
+                match msg {
+                    Some(Ok(msg)) => {
+                        let is_close = msg.is_close();
+                        if let Some(msg) = handler.on_frame(ctx, msg, Direction::ServerToClient).await {
+                            let _ = client_sink.send(msg).await;
+                        }
+                        if is_close { break; }
+                    }
+                    _ => break,
+                }
+            }
+        }
+    }
+
+    handler.on_close(ctx).await;
+    Ok(())
+}
+
+/// Raw bidirectional relay for already-upgraded WebSocket streams (no handler).
+async fn relay_raw_upgraded<A, B>(client: A, server: B) -> anyhow::Result<()>
+where
+    A: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
+        + futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
+        + Unpin,
+    B: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
+        + futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error>
+        + Unpin,
+{
+    let (mut client_sink, mut client_stream) = client.split();
+    let (mut server_sink, mut server_stream) = server.split();
+
+    loop {
+        tokio::select! {
+            msg = client_stream.next() => {
+                match msg {
+                    Some(Ok(msg)) => {
+                        let is_close = msg.is_close();
+                        let _ = server_sink.send(msg).await;
+                        if is_close { break; }
+                    }
+                    _ => break,
+                }
+            }
+            msg = server_stream.next() => {
+                match msg {
+                    Some(Ok(msg)) => {
+                        let is_close = msg.is_close();
+                        let _ = client_sink.send(msg).await;
+                        if is_close { break; }
+                    }
+                    _ => break,
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 
@@ -317,48 +393,5 @@ mod tests {
             .body(Body::Full(bytes::Bytes::new()))
             .unwrap();
         assert!(!is_websocket_response(&res404));
-    }
-
-    // ── is_websocket_upgrade_headers (HeaderMap-based) ─────────
-
-    fn make_upgrade_headers() -> hyper::HeaderMap {
-        let mut headers = hyper::HeaderMap::new();
-        headers.insert("upgrade", "websocket".parse().unwrap());
-        headers.insert("connection", "upgrade".parse().unwrap());
-        headers
-    }
-
-    #[test]
-    fn test_is_websocket_upgrade_headers_true() {
-        let headers = make_upgrade_headers();
-        assert!(is_websocket_upgrade_headers(&headers));
-    }
-
-    #[test]
-    fn test_is_websocket_upgrade_headers_missing_connection() {
-        let mut headers = hyper::HeaderMap::new();
-        headers.insert("upgrade", "websocket".parse().unwrap());
-        assert!(!is_websocket_upgrade_headers(&headers));
-    }
-
-    #[test]
-    fn test_is_websocket_upgrade_headers_case_insensitive() {
-        let mut headers = hyper::HeaderMap::new();
-        headers.insert("upgrade", "WebSocket".parse().unwrap());
-        headers.insert("connection", "Upgrade".parse().unwrap());
-        assert!(is_websocket_upgrade_headers(&headers));
-    }
-
-    #[test]
-    fn test_is_websocket_upgrade_headers_not_websocket() {
-        let mut headers = hyper::HeaderMap::new();
-        headers.insert("host", "example.com".parse().unwrap());
-        assert!(!is_websocket_upgrade_headers(&headers));
-    }
-
-    #[test]
-    fn test_is_websocket_upgrade_headers_empty() {
-        let headers = hyper::HeaderMap::new();
-        assert!(!is_websocket_upgrade_headers(&headers));
     }
 }

@@ -81,7 +81,7 @@ pub(crate) async fn handle_https(
     let mut http = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
     http.http1()
         .keep_alive(true)
-        .serve_connection(io, service_fn({
+        .serve_connection_with_upgrades(io, service_fn({
             let handler = handler.clone();
             let host = target_host.clone();
             let ws = ws_handler.clone();
@@ -105,11 +105,11 @@ pub(crate) async fn handle_https(
 /// Process a single HTTP request from the decrypted TLS stream.
 /// Called by Hyper's server for each request (keep-alive supported).
 async fn handle_https_request(
-    mut req: Request<hyper::body::Incoming>,
+    req: Request<hyper::body::Incoming>,
     handler: Arc<dyn HttpHandler>,
     ws_handler: Option<Arc<dyn WebSocketHandler>>,
     target_host: &str,
-    target: &str,
+    _target: &str,
     client_addr: SocketAddr,
 ) -> Result<Response<Full<Bytes>>, anyhow::Error> {
     let req_id = proxy::REQUEST_ID.fetch_add(1, Ordering::SeqCst);
@@ -118,16 +118,6 @@ async fn handle_https_request(
         host: target_host.to_string(),
         client_addr,
         is_https: true,
-    };
-
-    // Detect WebSocket upgrade BEFORE body conversion so we can
-    // grab hyper::upgrade::on(&mut req) — needed for Hyper to hand us
-    // the raw stream after the 101 response.
-    let is_ws = crate::ws_proxy::is_websocket_upgrade_headers(req.headers());
-    let on_upgrade = if is_ws {
-        Some(hyper::upgrade::on(&mut req))
-    } else {
-        None
     };
 
     // Convert Incoming body → our Body type
@@ -142,10 +132,10 @@ async fn handle_https_request(
         }
 
         Ok(RequestOrResponse::Request(mut req)) => {
-            // WebSocket upgrade — relay
-            if let Some(on_upgrade) = on_upgrade {
+            // WebSocket upgrade — detect after body conversion (Hudsucker pattern)
+            if hyper_tungstenite::is_upgrade_request(&req) {
                 return crate::ws_proxy::handle_https_websocket(
-                    req, on_upgrade, handler, ws_handler, &mut ctx, target_host, target,
+                    req, handler, ws_handler, &mut ctx, target_host,
                 ).await;
             }
 
