@@ -37,11 +37,20 @@ hyper-rustls = { version = "0.27", features = ["http2", "webpki-roots", "native-
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["decompression-gzip", "decompression-deflate", "decompression-br", "decompression-zstd"] }
 
+# Application-level body decoder plugin (opt-in)
+flate2 = { version = "1", optional = true }
+brotli = { version = "7", optional = true }
+zstd = { version = "0.13", optional = true, default-features = false }
+
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }
 
 [build-dependencies]
 vergen-gitcl = "1"
+
+[features]
+decoder = ["dep:flate2", "dep:brotli", "dep:zstd"]
+default = ["decoder"]
 
 [[bench]]
 name = "proxy_bench"

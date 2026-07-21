@@ -25,6 +25,10 @@ pub mod handler;
 pub mod builder;
 pub mod version;
 
+// Optional application-level body decoder
+#[cfg(feature = "decoder")]
+pub mod decoder;
+
 // Internal modules
 mod proxy;
 mod http_proxy;

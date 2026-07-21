@@ -64,6 +64,7 @@ src/
 ├── upstream.rs    # Tower service stack — Hyper client + DecompressionLayer, HTTP/2 ALPN
 ├── handler.rs     # HttpHandler + WebSocketHandler traits, Body, HttpContext, Direction
 ├── builder.rs     # ProxyBuilder — ergonomic proxy configuration
+├── decoder.rs     # App-layer body decoder — DecodeHandler plugin + encode/decode utilities
 └── error.rs       # Centralized ProxyError enum (thiserror)
 ```
 
@@ -96,6 +97,85 @@ Preferences → Privacy & Security → Certificates → View Certificates → Au
 - ✅ **Upstream connection pooling** — Hyper client with `LazyLock`-shared pool, HTTP/2 ALPN
 - ✅ **Tower middleware decompression** — gzip, deflate, brotli, zstd via tower-http DecompressionLayer
 - ✅ Unit test coverage for builder, handler stack, and core modules
+- ✅ **Application-level body decoder** — `DecodeHandler` plugin + `decode_request`/`decode_response`/`encode_body` utilities
+
+## Body Decoder (`decoder` feature)
+
+The `decoder` module provides application-level body decoding as an **opt-in plugin**.
+Unlike the transparent tower-http decompression in `upstream.rs` (which handles
+response bodies automatically), the decoder gives handlers explicit control over
+when and how to decode.
+
+### Relationship with tower-http
+
+| Direction | Tower (`decompress=true`) | DecodeHandler |
+|-----------|--------------------------|---------------|
+| Request   | Never touches            | Decodes gzip/deflate/brotli/zstd |
+| Response  | Decompresses automatically | Skips (header already stripped) |
+| Response  | Passes raw (`decompress=false`) | Decodes |
+
+### Usage — Tier 1 (Inspection)
+
+Add `DecodeHandler` to your chain. Tower stays on. Request bodies are decoded
+for downstream handlers; response bodies are already handled by tower.
+
+```rust
+use hexbuffer_proxy::decoder::DecodeHandler;
+
+let proxy = ProxyBuilder::new()
+    .with_ca(ca)
+    .with_http_handler(LoggingHandler::new())
+    .add_http_handler(DecodeHandler)           // ← decode request bodies
+    .add_http_handler(MyInspectionHandler)     // ← sees plain bytes
+    .build()?;
+```
+
+### Usage — Tier 2 (Forensic)
+
+Disable tower, add `DecodeHandler`. Both directions decoded at the app layer.
+Add a wire-capture handler before DecodeHandler to snapshot raw bytes.
+
+```rust
+let proxy = ProxyBuilder::new()
+    .with_ca(ca)
+    .with_decompression(false)                 // tower off
+    .with_http_handler(WireCapture::new("/tmp/capture"))
+    .add_http_handler(DecodeHandler)           // decode both directions
+    .add_http_handler(MyInspector)
+    .build()?;
+```
+
+### Usage — Tier 3 (Repeater / Modifier)
+
+Use the free functions directly for fine-grained control:
+
+```rust
+use hexbuffer_proxy::decoder::{decode_request, encode_body};
+
+async fn handle_request(&self, ctx: &mut HttpContext, req: Request<Body>) -> Result<RequestOrResponse> {
+    // Decode
+    let req = decode_request(req).await?;
+    let bytes = req.body().into_bytes().await?;
+
+    // Modify
+    let modified = modify_body(&bytes);
+
+    // Re-encode with original compression
+    let body = encode_body(Body::Full(modified.into()), "gzip", None)?;
+
+    let (mut parts, _) = req.into_parts();
+    parts.headers.insert("Content-Encoding", "gzip".parse().unwrap());
+    Ok(RequestOrResponse::Request(Request::from_parts(parts, body)))
+}
+```
+
+### Cargo feature
+
+Enabled by default. Opt out to keep the binary lean:
+
+```toml
+hexbuffer-proxy = { default-features = false }
+```
 
 ## Versioning
 
@@ -155,3 +235,6 @@ After more commits on top of a tag, `git describe` automatically shows the dista
 | `tokio-tungstenite` | WebSocket frame parsing and relay |
 | `futures-util` | Stream/Sink combinators for WebSocket frames |
 | `tower` / `tower-http` | Middleware stack — DecompressionLayer for transparent body decoding |
+| `flate2` | Gzip/zlib codec — used by the `decoder` feature (opt-in) |
+| `brotli` | Brotli codec — used by the `decoder` feature (opt-in) |
+| `zstd` | Zstd codec — used by the `decoder` feature (opt-in) |
