@@ -97,6 +97,48 @@ Preferences → Privacy & Security → Certificates → View Certificates → Au
 - ✅ **Tower middleware decompression** — gzip, deflate, brotli, zstd via tower-http DecompressionLayer
 - ✅ Unit test coverage for builder, handler stack, and core modules
 
+## Versioning
+
+The version is derived from git tags at build time via [`vergen-gitcl`](https://crates.io/crates/vergen-gitcl).
+
+**Check the version:**
+```bash
+cargo run -- --version
+# hexbuffer-proxy v0.0.1
+
+# Or with -V
+cargo run -- -V
+```
+
+The startup banner also prints the version dynamically.
+
+**From library code:**
+```rust
+use hexbuffer_proxy::version;
+
+println!("{}", version::GIT_VERSION);  // e.g. "v0.0.2-3-gabc1234"
+println!("{}", version::GIT_SHA);      // full commit hash
+println!("{}", version::GIT_DIRTY);    // "true" if uncommitted changes
+```
+
+**Release workflow:**
+```bash
+# 1. Bump the version in Cargo.toml
+#    Edit version = "0.0.2"
+
+# 2. Commit and tag
+git add Cargo.toml
+git commit -m "release: v0.0.2"
+git tag v0.0.2
+
+# 3. Rebuild — the tag is now embedded
+cargo build
+cargo run -- --version
+# → hexbuffer-proxy v0.0.2
+```
+
+After more commits on top of a tag, `git describe` automatically shows the distance: `v0.0.2-3-gabc1234` (3 commits after v0.0.2, at commit `abc1234`).
+
 ## Tech Stack
 
 | Dependency | Purpose |

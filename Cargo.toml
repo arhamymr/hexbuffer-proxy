@@ -1,6 +1,6 @@
 [package]
 name = "hexbuffer-proxy"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2024"
 
 [dependencies]
@@ -39,6 +39,9 @@ tower-http = { version = "0.6", features = ["decompression-gzip", "decompression
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }
+
+[build-dependencies]
+vergen-gitcl = "1"
 
 [[bench]]
 name = "proxy_bench"

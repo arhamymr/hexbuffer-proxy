@@ -30,6 +30,7 @@ pub struct ProxyBuilder {
     handlers: Vec<Arc<dyn HttpHandler>>,
     ws_handler: Option<Arc<dyn WebSocketHandler>>,
     request_buffer_size: usize,
+    decompress: bool,
 }
 
 impl ProxyBuilder {
@@ -41,6 +42,7 @@ impl ProxyBuilder {
             handlers: Vec::new(),
             ws_handler: None,
             request_buffer_size: 16384,
+            decompress: true,
         }
     }
 
@@ -85,6 +87,16 @@ impl ProxyBuilder {
         self
     }
 
+    /// Enable or disable transparent body decompression (gzip, deflate, brotli, zstd).
+    ///
+    /// When enabled (default), upstream response bodies are automatically
+    /// decompressed before reaching the handler. When disabled, raw compressed
+    /// bytes pass through untouched — useful for caching proxies or forensics.
+    pub fn with_decompression(mut self, enabled: bool) -> Self {
+        self.decompress = enabled;
+        self
+    }
+
     /// Consume the builder and produce a ready-to-start `Proxy`.
     /// Finalize the builder and produce a [`Proxy`] ready to run.
     pub fn build(self) -> Result<Proxy> {
@@ -104,6 +116,7 @@ impl ProxyBuilder {
             handler,
             ws_handler: self.ws_handler,
             request_buffer_size: self.request_buffer_size,
+            decompress: self.decompress,
         })
     }
 }
@@ -125,6 +138,7 @@ pub struct Proxy {
     handler: Arc<dyn HttpHandler>,
     ws_handler: Option<Arc<dyn WebSocketHandler>>,
     request_buffer_size: usize,
+    decompress: bool,
 }
 
 impl Proxy {
@@ -137,6 +151,7 @@ impl Proxy {
         let handler = self.handler;
         let ws_handler = self.ws_handler;
         let buf_size = self.request_buffer_size;
+        let decompress = self.decompress;
 
         loop {
             let (stream, addr) = listener.accept().await?;
@@ -145,7 +160,7 @@ impl Proxy {
             let ws_handler = ws_handler.clone();
 
             tokio::spawn(async move {
-                if let Err(e) = crate::proxy::handle_client(stream, ca, handler, ws_handler, buf_size).await {
+                if let Err(e) = crate::proxy::handle_client(stream, ca, handler, ws_handler, buf_size, decompress).await {
                     eprintln!("[{}] error: {}", addr, e);
                 }
             });

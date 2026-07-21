@@ -28,6 +28,7 @@ pub(crate) async fn handle_client(
     handler: Arc<dyn HttpHandler>,
     ws_handler: Option<Arc<dyn WebSocketHandler>>,
     buf_size: usize,
+    decompress: bool,
 ) -> anyhow::Result<()> {
 
     // 1. Read the initial Request header 
@@ -60,14 +61,14 @@ pub(crate) async fn handle_client(
         };
 
         return crate::https_proxy::handle_https(
-            client_stream, ca, handler, ws_handler, &target, client_addr, buf_size,
+            client_stream, ca, handler, ws_handler, &target, client_addr, buf_size, decompress,
         ).await;
 
     }
 
     // Plain HTTP — delegate
     crate::http_proxy::handle_http(
-        client_stream, handler, ws_handler, client_addr, buf_size, request_str,
+        client_stream, handler, ws_handler, client_addr, buf_size, request_str, decompress,
     ).await
 }
 

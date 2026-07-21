@@ -1,8 +1,8 @@
 // upstream.rs — shared Hyper client with connection pooling,
-// HTTP/2 ALPN negotiation, and transparent body decompression
-// via tower-http's DecompressionLayer middleware.
+// HTTP/2 ALPN negotiation, and optional transparent body
+// decompression via tower-http's DecompressionLayer middleware.
 //
-// A single LazyLock<Tower service stack> is cloned per request
+// Two LazyLock service stacks are cloned per request
 // (cheap — clones share the connection pool).
 
 use std::sync::LazyLock;
@@ -27,11 +27,10 @@ type HyperClient = Client<
     BoxBody<Bytes, hyper::Error>,
 >;
 
-type DecompressionSvc = Decompression<HyperClient>;
+// ── Shared service stacks ───────────────────────────────────────
 
-// ── Shared service stack ────────────────────────────────────────
-
-static SERVICE: LazyLock<DecompressionSvc> = LazyLock::new(|| {
+/// Decompressing service — gzip, deflate, brotli, zstd stripped transparently.
+static SERVICE_DECOMPRESS: LazyLock<Decompression<HyperClient>> = LazyLock::new(|| {
     let https = hyper_rustls::HttpsConnectorBuilder::new()
         .with_webpki_roots()
         .https_or_http()
@@ -51,6 +50,20 @@ static SERVICE: LazyLock<DecompressionSvc> = LazyLock::new(|| {
         .layer(client)
 });
 
+/// Raw pass-through service — no decompression applied.
+static SERVICE_RAW: LazyLock<HyperClient> = LazyLock::new(|| {
+    let https = hyper_rustls::HttpsConnectorBuilder::new()
+        .with_webpki_roots()
+        .https_or_http()
+        .enable_http1()
+        .build();
+
+    Client::builder(TokioExecutor::new())
+        .pool_max_idle_per_host(20)
+        .pool_idle_timeout(Duration::from_secs(90))
+        .build(https)
+});
+
 // ── Helper ──────────────────────────────────────────────────────
 
 /// Convert internal `Body` into a boxed `http_body::Body` for Hyper without copying.
@@ -65,27 +78,33 @@ fn body_to_hyper(body: Body) -> BoxBody<Bytes, hyper::Error> {
 
 /// Send an HTTP request upstream through the pooled Hyper client.
 ///
-/// 1. The request body is streamed natively using Hyper's body abstractions.
-/// 2. The response stream from tower-http's `DecompressionLayer` decodes
-///    gzip, deflate, brotli, or zstd on the fly.
-/// 3. Decompressed body frames are collected into `Bytes` and wrapped into
-///    `Body::Full(decoded)` for downstream handler inspection.
-pub(crate) async fn send_request(req: Request<Body>) -> anyhow::Result<Response<Body>> {
+/// When `decompress` is true (default), gzip/deflate/brotli/zstd
+/// response bodies are decoded transparently via tower-http's
+/// `DecompressionLayer`.  When false, raw compressed bytes are
+/// passed through untouched — useful for caching proxies.
+pub(crate) async fn send_request(req: Request<Body>, decompress: bool) -> anyhow::Result<Response<Body>> {
     let (parts, body) = req.into_parts();
     let hyper_req = Request::from_parts(parts, body_to_hyper(body));
 
-    // Send upstream through the Tower service stack
-    let mut svc = SERVICE.clone();
-    let resp = svc.ready().await?.call(hyper_req).await?;
-
-    // 1. Decompression & Collection: Collect decompressed body frames (gzip/deflate/br/zstd)
-    let (parts, body) = resp.into_parts();
-    let decoded = body
-        .collect()
-        .await
-        .map_err(|e| anyhow::anyhow!("decompression failed: {e}"))?
-        .to_bytes();
-
-    // 2. Body Wrapping: Wrap decoded bytes into Body::Full for downstream handlers
-    Ok(Response::from_parts(parts, Body::Full(decoded)))
+    if decompress {
+        let mut svc = SERVICE_DECOMPRESS.clone();
+        let resp = svc.ready().await?.call(hyper_req).await?;
+        let (parts, body) = resp.into_parts();
+        let bytes = body
+            .collect()
+            .await
+            .map_err(|e| anyhow::anyhow!("decompression failed: {e}"))?
+            .to_bytes();
+        Ok(Response::from_parts(parts, Body::Full(bytes)))
+    } else {
+        let mut svc = SERVICE_RAW.clone();
+        let resp = svc.ready().await?.call(hyper_req).await?;
+        let (parts, body) = resp.into_parts();
+        let bytes = body
+            .collect()
+            .await
+            .map_err(|e| anyhow::anyhow!("upstream read: {e}"))?
+            .to_bytes();
+        Ok(Response::from_parts(parts, Body::Full(bytes)))
+    }
 }

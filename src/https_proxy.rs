@@ -41,6 +41,7 @@ pub(crate) async fn handle_https(
     target: &str,
     client_addr: SocketAddr,
     _buf_size: usize,
+    decompress: bool,
 ) -> anyhow::Result<()> {
     let target_host = target
         .split(':')
@@ -92,7 +93,7 @@ pub(crate) async fn handle_https(
                 let ws = ws.clone();
                 let tgt = tgt.clone();
                 async move {
-                    handle_https_request(req, handler, ws, &host, &tgt, client_addr).await
+                    handle_https_request(req, handler, ws, &host, &tgt, client_addr, decompress).await
                 }
             }
         }))
@@ -111,6 +112,7 @@ async fn handle_https_request(
     target_host: &str,
     _target: &str,
     client_addr: SocketAddr,
+    decompress: bool,
 ) -> Result<Response<Full<Bytes>>, anyhow::Error> {
     let req_id = proxy::REQUEST_ID.fetch_add(1, Ordering::SeqCst);
     let mut ctx = HttpContext {
@@ -148,7 +150,7 @@ async fn handle_https_request(
             }
 
             // ── Upstream ──────────────────────────────────────
-            let response = crate::upstream::send_request(req).await
+            let response = crate::upstream::send_request(req, decompress).await
                 .map_err(|e| anyhow::anyhow!("[#{}] upstream: {e}", req_id))?;
 
             // ── Handler: response ─────────────────────────────

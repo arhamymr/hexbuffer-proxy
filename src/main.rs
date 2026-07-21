@@ -5,7 +5,7 @@ use http::{Request, Response};
 
 use hexbuffer_proxy::{
     Body, CertificationAuthority, Direction, HttpContext, HttpHandler, ProxyBuilder,
-    RequestOrResponse, WebSocketHandler, WebSocketMessage,
+    RequestOrResponse, WebSocketHandler, WebSocketMessage, version,
 };
 
 // ── TLS crypto provider (required by rustls) ──────────────────
@@ -224,6 +224,13 @@ impl WebSocketHandler for WsLogger {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // ── Version flag ─────────────────────────────────────────
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("hexbuffer-proxy {}", version::GIT_VERSION);
+        return Ok(());
+    }
+
     // Rustls crypto provider — must be installed before any TLS
     let _ = default_provider().install_default();
 
@@ -254,7 +261,7 @@ async fn main() -> anyhow::Result<()> {
         .build()?;
 
     eprintln!("╔══════════════════════════════════════╗");
-    eprintln!("║        hexbuffer-proxy v0.1          ║");
+    eprintln!("║  hexbuffer-proxy {:<21}║", version::GIT_VERSION);
     eprintln!("╠══════════════════════════════════════╣");
     eprintln!("║ Listen:  127.0.0.1:8080              ║");
     eprintln!("║ TLS CA:  cert/ca.pem                 ║");
