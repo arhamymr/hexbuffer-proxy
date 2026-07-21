@@ -5,7 +5,7 @@ use anyhow;
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use http::{Request, Response};
-use http_body_util::Full;
+use http_body_util::{Full, combinators::BoxBody, BodyExt};
 use hyper_tungstenite;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
@@ -136,7 +136,7 @@ pub(crate) async fn handle_https_websocket(
     ws_handler: Option<Arc<dyn WebSocketHandler>>,
     ctx: &mut HttpContext,
     target_host: &str,
-) -> Result<Response<Full<Bytes>>, anyhow::Error> {
+) -> Result<Response<BoxBody<Bytes, hyper::Error>>, anyhow::Error> {
     // 1. Make URI absolute if needed and rewrite scheme: https → wss
     if req.uri().scheme().is_none() {
         let uri: http::Uri = format!("https://{}{}", target_host, req.uri())
@@ -165,7 +165,7 @@ pub(crate) async fn handle_https_websocket(
     for (key, value) in res.headers() {
         response_builder = response_builder.header(key, value);
     }
-    let client_res = response_builder.body(Full::new(Bytes::new()))?;
+    let client_res = response_builder.body(Full::new(Bytes::new()).map_err(|e| match e {}).boxed())?;
 
     // 4. Spawn relay task — connects to upstream and relays frames
     let ctx_id = ctx.id;

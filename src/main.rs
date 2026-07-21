@@ -117,56 +117,6 @@ impl HttpHandler for PassthroughHandler {
     }
 }
 
-// ── BlocklistHandler ──────────────────────────────────────────
-
-/// Blocks requests to configured host patterns (demo WAF rule).
-/// Returns a 403 Forbidden response without contacting the upstream.
-struct BlocklistHandler {
-    blocked: Vec<String>,
-}
-
-#[async_trait]
-impl HttpHandler for BlocklistHandler {
-    async fn handle_request(
-        &self,
-        ctx: &mut HttpContext,
-        request: Request<Body>,
-    ) -> hexbuffer_proxy::Result<RequestOrResponse> {
-        for pattern in &self.blocked {
-            if ctx.host.contains(pattern.as_str()) {
-                eprintln!(
-                    "[#{:>04}] 🚫 BLOCKED host=\"{host}\" matches=\"{pattern}\"",
-                    ctx.id,
-                    host = ctx.host,
-                    pattern = pattern,
-                );
-
-                let body_text = format!(
-                    "Blocked by hexbuffer-proxy\nHost \"{}\" matched blocklist pattern \"{}\"",
-                    ctx.host, pattern
-                );
-
-                let res = Response::builder()
-                    .status(403)
-                    .header("Content-Type", "text/plain")
-                    .body(Body::Full(body_text.into()))
-                    .unwrap();
-
-                return Ok(RequestOrResponse::Response(res));
-            }
-        }
-        Ok(RequestOrResponse::Request(request))
-    }
-
-    async fn handle_response(
-        &self,
-        _ctx: &mut HttpContext,
-        response: Response<Body>,
-    ) -> hexbuffer_proxy::Result<Response<Body>> {
-        Ok(response)
-    }
-}
-
 // ── WsLogger ──────────────────────────────────────────────────
 
 /// Logs every WebSocket frame passing through the proxy.
@@ -241,7 +191,7 @@ async fn main() -> anyhow::Result<()> {
     //
     // Handler chain (runs in order for requests, reverse for responses):
     //   1. LoggingHandler — assigns request ID, logs every request/response
-    //   2. BlocklistHandler — blocks matching hosts with 403
+    //   2. PassthroughHandler — skips TLS decryption for ad/tracking domains
     //
     // WebSocket frames are intercepted by WsLogger.
     let proxy = ProxyBuilder::new()
@@ -254,9 +204,6 @@ async fn main() -> anyhow::Result<()> {
                 "googletagmanager.com".into(),
             ],
         })
-        .add_http_handler(BlocklistHandler {
-            blocked: vec![],
-        })
         .with_ws_handler(WsLogger)
         .build()?;
 
@@ -267,7 +214,6 @@ async fn main() -> anyhow::Result<()> {
     eprintln!("║ TLS CA:  cert/ca.pem                 ║");
     eprintln!("║ Upstream: Hyper (pooled, HTTP/2)     ║");
     eprintln!("║ Decompress: tower-http (gzip/br/zstd)║");
-    eprintln!("║ WAF:      blocklist active           ║");
     eprintln!("║ WS:       frame logger active        ║");
     eprintln!("╚══════════════════════════════════════╝");
     eprintln!();

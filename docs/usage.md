@@ -468,6 +468,5 @@ Browser ──TCP──▶ hexbuffer-proxy ──Hyper──▶ Upstream Server
 
 See [`src/main.rs`](../src/main.rs) for a complete working example with:
 - `LoggingHandler` — assigns request IDs, logs method/URI/status/size with direction icons
-- `BlocklistHandler` — blocks ad/tracking hosts (doubleclick.net, google-analytics.com, googletagmanager.com) with 403
 - `WsLogger` — logs every WebSocket frame (text size, binary size, ping/pong, close reason)
 - Graceful Ctrl+C shutdown

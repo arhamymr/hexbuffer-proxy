@@ -6,11 +6,12 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 // tokio
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 // http
 use http::{Request, Response};
+use hyper::body::Body as HttpBody;
 
 /// Hook point counter for generating unique request IDs.
 pub(crate) static REQUEST_ID: AtomicU64 = AtomicU64::new(1);
@@ -194,6 +195,61 @@ pub(crate) fn serialize_response(res: &Response<Body>) -> Vec<u8> {
     }
 
     out
+}
+
+/// Serialize response status line + headers only (no body).
+/// Used before streaming the body chunk-by-chunk.
+pub(crate) fn serialize_response_head(res: &Response<Body>) -> Vec<u8> {
+    let mut out = format!(
+        "HTTP/1.1 {} {}\r\n",
+        res.status().as_u16(),
+        res.status().canonical_reason().unwrap_or("OK")
+    ).into_bytes();
+
+    for (key, value) in res.headers() {
+        out.extend_from_slice(key.as_str().as_bytes());
+        out.extend_from_slice(b": ");
+        out.extend_from_slice(value.as_bytes());
+        out.extend_from_slice(b"\r\n");
+    }
+    out.extend_from_slice(b"\r\n");
+
+    out
+}
+
+/// Write a `Body` to a byte stream — `Full` written in one shot,
+/// `Streaming` written chunk-by-chunk.
+pub(crate) async fn write_body_to_stream(
+    mut body: Body,
+    writer: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> anyhow::Result<()> {
+    match &mut body {
+        Body::Full(bytes) => {
+            writer.write_all(bytes).await?;
+        }
+        Body::Streaming(boxed) => {
+            use std::pin::Pin;
+            use std::task::Context;
+            loop {
+                let frame: Option<std::result::Result<hyper::body::Frame<bytes::Bytes>, _>> = std::future::poll_fn(|cx: &mut Context<'_>| {
+                    Pin::new(&mut *boxed).poll_frame(cx)
+                }).await;
+                match frame {
+                    Some(Ok(frame)) => {
+                        if let Ok(data) = frame.into_data() {
+                            writer.write_all(&data).await?;
+                        }
+                        // Trailers frames are ignored (no-op for HTTP/1.1)
+                    }
+                    Some(Err(e)) => {
+                        return Err(anyhow::anyhow!("body stream error: {e}"));
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 

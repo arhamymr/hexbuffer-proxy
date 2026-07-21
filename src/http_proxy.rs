@@ -104,9 +104,12 @@ pub(crate) async fn handle_http(
 
                 let response = crate::upstream::send_request(req, decompress).await?;
                 let modified_response = handler.handle_response(&mut ctx, response).await?;
-                let final_bytes = proxy::serialize_response(&modified_response);
 
-                client_stream.write_all(&final_bytes).await?;
+                // Write headers first, then stream body chunks
+                let headers = proxy::serialize_response_head(&modified_response);
+                client_stream.write_all(&headers).await?;
+                let (_, body) = modified_response.into_parts();
+                proxy::write_body_to_stream(body, &mut client_stream).await?;
                 client_stream.shutdown().await?;
             }
             Ok(())

@@ -3,8 +3,9 @@ use std::net::SocketAddr;
 use async_trait::async_trait;
 
 use http::{Request, Response};
-use http_body_util::{BodyExt, Full};
+use http_body_util::{BodyExt, Full, combinators::BoxBody};
 use bytes::Bytes;
+use hyper;
 
 use crate::error::Result;
 
@@ -27,10 +28,10 @@ pub struct HttpContext {
 
 /// An HTTP body — either streaming from the upstream or fully buffered.
 /// Unified body type that can represent:
-/// - `Streaming(Incoming)` — a live upstream response body
+/// - `Streaming(BoxBody)` — a live upstream response body (streamed, not buffered)
 /// - `Full(Bytes)` — a pre-buffered body (parsed requests, short-circuit responses)
 pub enum Body {
-    Streaming(hyper::body::Incoming),
+    Streaming(BoxBody<Bytes, hyper::Error>),
     Full(Bytes),
 }
 
@@ -39,13 +40,22 @@ impl Body {
     pub async fn into_bytes(self) -> Result<Bytes> {
         match self {
             Body::Full(b) => Ok(b),
-            Body::Streaming(incoming) => {
-                let collected = incoming
+            Body::Streaming(boxed) => {
+                let collected = boxed
                     .collect()
                     .await
                     .map_err(|e| crate::error::ProxyError::Protocol(e.to_string()))?;
                 Ok(collected.to_bytes())
             }
+        }
+    }
+
+    /// Convert this body into a boxed body suitable for Hyper responses.
+    /// `Full` bodies are wrapped; `Streaming` bodies pass through.
+    pub(crate) fn into_boxed(self) -> BoxBody<Bytes, hyper::Error> {
+        match self {
+            Body::Full(b) => Full::new(b).map_err(|e| match e {}).boxed(),
+            Body::Streaming(boxed) => boxed,
         }
     }
 }
@@ -58,7 +68,7 @@ impl From<Bytes> for Body {
 
 impl From<hyper::body::Incoming> for Body {
     fn from(b: hyper::body::Incoming) -> Self {
-        Body::Streaming(b)
+        Body::Streaming(b.boxed())
     }
 }
 

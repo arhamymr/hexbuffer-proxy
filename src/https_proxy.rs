@@ -19,7 +19,7 @@ use tokio_rustls::{
 use bytes::Bytes;
 use hyper::service::service_fn;
 use hyper::{Request, Response};
-use http_body_util::Full;
+use http_body_util::{Full, combinators::BoxBody, BodyExt};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 
 /// Handle an HTTPS CONNECT tunnel.
@@ -113,7 +113,7 @@ async fn handle_https_request(
     _target: &str,
     client_addr: SocketAddr,
     decompress: bool,
-) -> Result<Response<Full<Bytes>>, anyhow::Error> {
+) -> Result<Response<BoxBody<Bytes, hyper::Error>>, anyhow::Error> {
     let req_id = proxy::REQUEST_ID.fetch_add(1, Ordering::SeqCst);
     let mut ctx = HttpContext {
         id: req_id,
@@ -129,8 +129,7 @@ async fn handle_https_request(
     match handler.handle_request(&mut ctx, req).await {
         Ok(RequestOrResponse::Response(res)) => {
             let (parts, body) = res.into_parts();
-            let bytes = body.into_bytes().await?;
-            Ok(Response::from_parts(parts, Full::new(bytes)))
+            Ok(Response::from_parts(parts, body.into_boxed()))
         }
 
         Ok(RequestOrResponse::Request(mut req)) => {
@@ -158,15 +157,14 @@ async fn handle_https_request(
                 .map_err(|e| anyhow::anyhow!("[#{}] response handler: {e}", req_id))?;
 
             let (parts, body) = modified.into_parts();
-            let bytes = body.into_bytes().await?;
-            Ok(Response::from_parts(parts, Full::new(bytes)))
+            Ok(Response::from_parts(parts, body.into_boxed()))
         }
 
         Err(e) => {
             eprintln!("[#{}] request handler error: {}", req_id, e);
             Ok(Response::builder()
                 .status(502)
-                .body(Full::new(Bytes::from("Bad Gateway")))
+                .body(Full::new(Bytes::from("Bad Gateway")).map_err(|e| match e {}).boxed())
                 .unwrap())
         }
     }
