@@ -1,5 +1,8 @@
 # hexbuffer-proxy
 
+[![Rust](https://img.shields.io/badge/rust-2024_edition-orange.svg)](https://www.rust-lang.org/)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 An HTTPS MITM (Man-in-the-Middle) proxy written in Rust. It intercepts encrypted HTTPS traffic by dynamically generating TLS certificates for target domains, allowing inspection and modification of request/response data.
 
 ## How It Works
