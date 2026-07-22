@@ -48,7 +48,3 @@ criterion = { version = "0.5", features = ["async_tokio"] }
 [features]
 decoder = ["dep:flate2", "dep:brotli", "dep:zstd"]
 default = ["decoder"]
-
-[[bench]]
-name = "proxy_bench"
-harness = false

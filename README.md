@@ -30,14 +30,14 @@ Browser → hexbuffer-proxy (decrypts) → Upstream Server
 ## Quick Start
 
 ```bash
-# Build and run
+# Build and run the proxy example
 make run
 
 # Or manually
-cargo run
+cargo run --example proxy
 
-# Start with proxy disabled (bypasses TLS interception, relays raw TCP streams)
-cargo run -- --disabled
+# Start example with proxy disabled (bypasses TLS interception, relays raw TCP streams)
+cargo run --example proxy -- --disabled
 ```
 
 The proxy listens on `127.0.0.1:8080`. Configure your browser or system to use it as an HTTP/HTTPS proxy.
@@ -46,7 +46,7 @@ The proxy listens on `127.0.0.1:8080`. Configure your browser or system to use i
 
 | Command | Description |
 |---------|-------------|
-| `make run` | Build and run the proxy |
+| `make run` | Build and run the proxy example |
 | `make build` | Compile debug build |
 | `make release` | Compile optimized release build |
 | `make check` | Check for compilation errors (fast, no output binary) |
@@ -60,7 +60,6 @@ The proxy listens on `127.0.0.1:8080`. Configure your browser or system to use i
 
 ```
 src/
-├── main.rs        # Entry point — thin binary, 12 lines via ProxyBuilder
 ├── lib.rs         # Library root — module declarations + public re-exports
 ├── ca.rs          # Certificate authority — generates CA & per-domain TLS certs (rcgen)
 ├── proxy.rs       # Request dispatcher — routes CONNECT vs HTTP, shared parse/serialize/body helpers
@@ -72,6 +71,9 @@ src/
 ├── builder.rs     # ProxyBuilder — ergonomic proxy configuration
 ├── decoder.rs     # App-layer body decoder — DecodeHandler plugin + encode/decode utilities
 └── error.rs       # Centralized ProxyError enum (thiserror)
+
+examples/
+└── proxy.rs       # Complete usage example demonstrating custom handlers & CLI flags
 ```
 
 ## Trusting the CA Certificate
@@ -210,7 +212,7 @@ assert!(!proxy.is_enabled());
 
 ```bash
 # Start with proxy disabled
-cargo run -- --disabled
+cargo run --example proxy -- --disabled
 ```
 
 ## Versioning
@@ -219,11 +221,11 @@ The version is defined in `Cargo.toml` (`CARGO_PKG_VERSION`).
 
 **Check the version:**
 ```bash
-cargo run -- --version
+cargo run --example proxy -- --version
 # hexbuffer-proxy v0.0.1
 
 # Or with -V
-cargo run -- -V
+cargo run --example proxy -- -V
 ```
 
 The startup banner also prints the crate version dynamically.
