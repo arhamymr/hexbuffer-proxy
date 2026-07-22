@@ -5,7 +5,7 @@ use http::{Request, Response};
 
 use hexbuffer_proxy::{
     Body, CertificationAuthority, Direction, HttpContext, HttpHandler, ProxyBuilder,
-    RequestOrResponse, WebSocketHandler, WebSocketMessage, version,
+    RequestOrResponse, WebSocketHandler, WebSocketMessage,
 };
 
 // ── TLS crypto provider (required by rustls) ──────────────────
@@ -124,11 +124,7 @@ struct WsLogger;
 
 #[async_trait]
 impl WebSocketHandler for WsLogger {
-    async fn on_upgrade(
-        &self,
-        ctx: &mut HttpContext,
-        request: Request<Body>,
-    ) -> Request<Body> {
+    async fn on_upgrade(&self, ctx: &mut HttpContext, request: Request<Body>) -> Request<Body> {
         eprintln!(
             "[#{:>04}] 🔌 WebSocket upgrade: {uri}",
             ctx.id,
@@ -174,12 +170,15 @@ impl WebSocketHandler for WsLogger {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // ── Version flag ─────────────────────────────────────────
+    // ── Version flag & options ─────────────────────────────
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("hexbuffer-proxy {}", version::GIT_VERSION);
+        println!("hexbuffer-proxy v{}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
+
+    // ponytail: allow starting in disabled state via --disabled or --disable flag
+    let enabled_by_default = !args.iter().any(|a| a == "--disabled" || a == "--disable");
 
     // Rustls crypto provider — must be installed before any TLS
     let _ = default_provider().install_default();
@@ -196,6 +195,7 @@ async fn main() -> anyhow::Result<()> {
     // WebSocket frames are intercepted by WsLogger.
     let proxy = ProxyBuilder::new()
         .with_ca(ca)
+        .with_enabled(enabled_by_default)
         .with_http_handler(LoggingHandler::new())
         .add_http_handler(PassthroughHandler {
             passthrough: vec![
@@ -207,9 +207,18 @@ async fn main() -> anyhow::Result<()> {
         .with_ws_handler(WsLogger)
         .build()?;
 
+    let status_str = if enabled_by_default {
+        "ENABLED"
+    } else {
+        "DISABLED"
+    };
     eprintln!("╔══════════════════════════════════════╗");
-    eprintln!("║  hexbuffer-proxy {:<21}║", version::GIT_VERSION);
+    eprintln!(
+        "║  hexbuffer-proxy {:<21}║",
+        format!("v{}", env!("CARGO_PKG_VERSION"))
+    );
     eprintln!("╠══════════════════════════════════════╣");
+    eprintln!("║ Status:  {:<28}║", status_str);
     eprintln!("║ Listen:  127.0.0.1:8080              ║");
     eprintln!("║ TLS CA:  cert/ca.pem                 ║");
     eprintln!("║ Upstream: Hyper (pooled, HTTP/2)     ║");
@@ -236,4 +245,99 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Unit Tests
+// ═══════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_ctx() -> HttpContext {
+        HttpContext {
+            id: 0,
+            host: "example.com".into(),
+            client_addr: "127.0.0.1:12345".parse().unwrap(),
+            is_https: true,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_logging_handler_assigns_ids_and_handles_traffic() {
+        let handler = LoggingHandler::new();
+        let mut ctx = make_ctx();
+
+        let req = Request::builder()
+            .uri("https://example.com/api")
+            .body(Body::Full(bytes::Bytes::from("hello")))
+            .unwrap();
+
+        let res_req = handler.handle_request(&mut ctx, req).await.unwrap();
+        assert_eq!(ctx.id, 0);
+
+        match res_req {
+            RequestOrResponse::Request(r) => assert_eq!(r.uri().path(), "/api"),
+            _ => panic!("expected Request"),
+        }
+
+        let resp = Response::builder()
+            .status(200)
+            .body(Body::Full(bytes::Bytes::from("world")))
+            .unwrap();
+
+        let res_resp = handler.handle_response(&mut ctx, resp).await.unwrap();
+        assert_eq!(res_resp.status(), 200);
+
+        // Next request gets incremented ID
+        let req2 = Request::builder()
+            .uri("https://example.com/other")
+            .body(Body::Full(bytes::Bytes::from("")))
+            .unwrap();
+        let _ = handler.handle_request(&mut ctx, req2).await.unwrap();
+        assert_eq!(ctx.id, 1);
+    }
+
+    #[tokio::test]
+    async fn test_passthrough_handler_bypasses_configured_domains() {
+        let handler = PassthroughHandler {
+            passthrough: vec!["doubleclick.net".into(), "google-analytics.com".into()],
+        };
+
+        // Exact host match
+        assert!(!handler.should_intercept_tls("doubleclick.net").await);
+
+        // Subdomain match
+        assert!(!handler.should_intercept_tls("ad.doubleclick.net").await);
+        assert!(
+            !handler
+                .should_intercept_tls("stats.google-analytics.com")
+                .await
+        );
+
+        // Unmatched host should be intercepted
+        assert!(handler.should_intercept_tls("example.com").await);
+        assert!(handler.should_intercept_tls("notdoubleclick.net").await);
+    }
+
+    #[tokio::test]
+    async fn test_ws_logger_frames() {
+        let logger = WsLogger;
+        let mut ctx = make_ctx();
+
+        let text_frame = WebSocketMessage::Text("hello ws".into());
+        let res = logger
+            .on_frame(&mut ctx, text_frame.clone(), Direction::ClientToServer)
+            .await;
+        assert_eq!(res, Some(text_frame));
+
+        let bin_frame = WebSocketMessage::Binary(vec![1, 2, 3].into());
+        let res = logger
+            .on_frame(&mut ctx, bin_frame.clone(), Direction::ServerToClient)
+            .await;
+        assert_eq!(res, Some(bin_frame));
+
+        logger.on_close(&mut ctx).await;
+    }
 }

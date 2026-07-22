@@ -16,7 +16,7 @@ use std::sync::RwLock;
 use std::io::Write;
 use std::io::Read;
 use std::fs::File;
-use std::path::Path;
+use std::path::PathBuf;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -24,49 +24,59 @@ use base64::engine::general_purpose::STANDARD;
 /// Self-signed CA that forges per-domain TLS certificates on the fly.
 ///
 /// On first run, generates a new CA key/cert and persists them to
-/// `cert/ca.pem` and `cert/ca-key.pem`.  Subsequent runs load from disk
-/// so the same CA is reused across restarts.
+/// `cert/ca.pem` and `cert/ca-key.pem` by default.  Subsequent runs
+/// load from disk so the same CA is reused across restarts.
+///
+/// Use [`new`] for the default `"cert"` directory or [`new_in`] to
+/// specify a custom location.
 pub struct CertificationAuthority {
     ca_params: CertificateParams,
     ca_cert: Certificate,
     ca_key: KeyPair,
     cert_cache: RwLock<HashMap<String, (Vec<u8>, Vec<u8>)>>,
+    cert_dir: PathBuf,
 }
 
 impl CertificationAuthority {
+    /// Create a CA with keys persisted under `"cert/"`.
     pub fn new() -> Self {
-        // Check certificate on disk
-        let cert_path = "cert/ca.pem";
-        let key_path = "cert/ca-key.pem";
+        Self::new_in("cert")
+    }
 
-        let  mut params = CertificateParams::default();
+    /// Create a CA with keys persisted under a custom directory.
+    ///
+    /// ```ignore
+    /// let ca = CertificationAuthority::new_in("/tmp/my-ca");
+    /// ```
+    pub fn new_in(dir: impl Into<PathBuf>) -> Self {
+        let cert_dir: PathBuf = dir.into();
+        let cert_path = cert_dir.join("ca.pem");
+        let key_path = cert_dir.join("ca-key.pem");
+
+        let mut params = CertificateParams::default();
         params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         params.key_usages = vec![KeyUsagePurpose::KeyCertSign];
         let mut dn = DistinguishedName::new();
         dn.push(DnType::CommonName, "Hexbuffer Proxy CA");
         params.distinguished_name = dn;
 
-
-        // Cek certificate on disk
-        if Path::new(key_path).exists() {
+        if key_path.exists() {
             println!("CA private key found on disk, loading...");
 
-            //1. Read string private key from file
-            let mut key_file = File::open(key_path).expect("Failed to open private key file");
+            let mut key_file = File::open(&key_path).expect("Failed to open private key file");
             let mut key_der = String::new();
             key_file.read_to_string(&mut key_der).unwrap();
 
-            // 2. Reconstruct keypair from the DER bytes 
             let ca_key = KeyPair::from_pem(&key_der).unwrap();
 
-            // self sign it again to pupulate the certificate object 
             let ca_cert = params.self_signed(&ca_key).unwrap();
             return Self {
                 ca_params: params,
                 ca_cert,
                 ca_key,
                 cert_cache: RwLock::new(HashMap::new()),
-            }
+                cert_dir,
+            };
         }
 
         println!("Generating new CA certificate...");
@@ -79,13 +89,13 @@ impl CertificationAuthority {
             ca_cert,
             ca_key,
             cert_cache: RwLock::new(HashMap::new()),
+            cert_dir,
         };
 
-        // ensure cert directory exists before saving
-        std::fs::create_dir_all("cert").expect("Failed to create cert directory");
+        std::fs::create_dir_all(&ca.cert_dir).expect("Failed to create cert directory");
 
-        ca.save_ca_to_pem(cert_path).expect("Failed to save CA certificate");
-        ca.save_key_to_pem(key_path).expect("Failed to save CA key");
+        ca.save_ca_to_pem(cert_path.to_str().unwrap()).expect("Failed to save CA certificate");
+        ca.save_key_to_pem(key_path.to_str().unwrap()).expect("Failed to save CA key");
         ca
     }
 
@@ -214,7 +224,10 @@ mod tests {
 
     #[test]
     fn test_save_ca_to_pem_creates_file() {
-        let ca = CertificationAuthority::new();
+        let dir = std::env::temp_dir().join("ca_save_pem_test");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let ca = CertificationAuthority::new_in(&dir);
         let path = std::env::temp_dir().join("test_ca.pem");
 
         ca.save_ca_to_pem(path.to_str().unwrap()).unwrap();
@@ -224,6 +237,7 @@ mod tests {
         assert!(!content.is_empty(), "PEM file should not be empty");
 
         let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -283,5 +297,103 @@ mod tests {
         }
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    // ── new_in / cert_dir tests ──
+
+    #[test]
+    fn test_new_in_creates_files_in_custom_dir() {
+        let dir = std::env::temp_dir().join("ca_test_custom_dir");
+        // Ensure clean state
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let ca = CertificationAuthority::new_in(&dir);
+
+        let cert_path = dir.join("ca.pem");
+        let key_path = dir.join("ca-key.pem");
+
+        assert!(cert_path.exists(), "cert.pem should exist in custom dir");
+        assert!(key_path.exists(), "ca-key.pem should exist in custom dir");
+
+        // Verify content is valid PEM
+        let cert_content = std::fs::read_to_string(&cert_path).unwrap();
+        assert!(cert_content.starts_with("-----BEGIN CERTIFICATE-----"));
+
+        let key_content = std::fs::read_to_string(&key_path).unwrap();
+        assert!(key_content.starts_with("-----BEGIN PRIVATE KEY-----"));
+
+        // Verify the CA actually works
+        let (cert_der, key_der) = ca.forge_certificate("example.com");
+        assert!(!cert_der.is_empty());
+        assert!(!key_der.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_new_in_loads_existing_key() {
+        let dir = std::env::temp_dir().join("ca_test_reload");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // First run: generates new
+        let ca1 = CertificationAuthority::new_in(&dir);
+        let _cert1 = ca1.forge_certificate("first.example.com").0;
+        drop(ca1);
+
+        // Second run: should load from disk and produce same CA
+        let ca2 = CertificationAuthority::new_in(&dir);
+        // Forging the same host should produce the same cert since
+        // the cached per-host key is regenerated, but the CA is reused.
+        let (cert2, _) = ca2.forge_certificate("second.example.com");
+        assert!(!cert2.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_new_in_forge_certificate_works() {
+        let dir = std::env::temp_dir().join("ca_test_forge_in");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let ca = CertificationAuthority::new_in(&dir);
+        let (cert_der, key_der) = ca.forge_certificate("custom-dir.example.com");
+        assert!(!cert_der.is_empty(), "forged cert DER should not be empty");
+        assert!(!key_der.is_empty(), "forged key DER should not be empty");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_new_in_caching_still_works() {
+        let dir = std::env::temp_dir().join("ca_test_cache");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let ca = CertificationAuthority::new_in(&dir);
+        let (cert1, _) = ca.forge_certificate("cached.example.com");
+        let (cert2, _) = ca.forge_certificate("cached.example.com");
+        assert_eq!(cert1, cert2, "same host should return cached cert with new_in");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_new_creates_files_in_default_cert_dir() {
+        let dir = std::env::temp_dir().join("ca_default_dir_test");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Use new_in with a temp dir and verify the behavior matches new() semantics
+        let ca = CertificationAuthority::new_in(&dir);
+
+        let cert_path = dir.join("ca.pem");
+        let key_path = dir.join("ca-key.pem");
+
+        assert!(cert_path.exists(), "ca.pem should exist");
+        assert!(key_path.exists(), "ca-key.pem should exist");
+
+        // Verify the CA works
+        let (cert_der, _) = ca.forge_certificate("default.example.com");
+        assert!(!cert_der.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

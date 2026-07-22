@@ -32,6 +32,9 @@ make run
 
 # Or manually
 cargo run
+
+# Start with proxy disabled (bypasses TLS interception, relays raw TCP streams)
+cargo run -- --disabled
 ```
 
 The proxy listens on `127.0.0.1:8080`. Configure your browser or system to use it as an HTTP/HTTPS proxy.
@@ -86,6 +89,7 @@ Preferences → Privacy & Security → Certificates → View Certificates → Au
 - ✅ Plain HTTP proxying — forward non-CONNECT requests with handler hooks
 - ✅ Dynamic TLS certificate generation per domain
 - ✅ CA certificate persistence, caching, and auto-creation
+- ✅ **Proxy enable/disable toggle** — bypass TLS interception via `with_enabled()` on `ProxyBuilder` or `--disabled` CLI flag
 - ✅ **Trait-based `HttpHandler` system** — intercept and modify requests/responses
 - ✅ **`ProxyBuilder`** — ergonomic one-liner proxy configuration
 - ✅ **Handler pipeline** — parse → handler stack → serialize integrated into proxy flow
@@ -177,9 +181,38 @@ Enabled by default. Opt out to keep the binary lean:
 hexbuffer-proxy = { default-features = false }
 ```
 
+## Enabling and Disabling the Proxy
+
+You can start the proxy in a disabled state or toggle it at runtime. When disabled, TLS interception is skipped (`should_intercept_tls` returns `false`), allowing `CONNECT` tunnels to pass through directly as raw TCP streams.
+
+### Library Usage
+
+```rust
+use hexbuffer_proxy::ProxyBuilder;
+
+// Build with custom initial state (default is enabled = true)
+let proxy = ProxyBuilder::new()
+    .with_enabled(false)
+    .build()?;
+
+// Dynamically enable or disable at runtime
+proxy.enable();
+assert!(proxy.is_enabled());
+
+proxy.disable();
+assert!(!proxy.is_enabled());
+```
+
+### CLI Flag
+
+```bash
+# Start with proxy disabled
+cargo run -- --disabled
+```
+
 ## Versioning
 
-The version is derived from git tags at build time via [`vergen-gitcl`](https://crates.io/crates/vergen-gitcl).
+The version is defined in `Cargo.toml` (`CARGO_PKG_VERSION`).
 
 **Check the version:**
 ```bash
@@ -190,34 +223,7 @@ cargo run -- --version
 cargo run -- -V
 ```
 
-The startup banner also prints the version dynamically.
-
-**From library code:**
-```rust
-use hexbuffer_proxy::version;
-
-println!("{}", version::GIT_VERSION);  // e.g. "v0.0.2-3-gabc1234"
-println!("{}", version::GIT_SHA);      // full commit hash
-println!("{}", version::GIT_DIRTY);    // "true" if uncommitted changes
-```
-
-**Release workflow:**
-```bash
-# 1. Bump the version in Cargo.toml
-#    Edit version = "0.0.2"
-
-# 2. Commit and tag
-git add Cargo.toml
-git commit -m "release: v0.0.2"
-git tag v0.0.2
-
-# 3. Rebuild — the tag is now embedded
-cargo build
-cargo run -- --version
-# → hexbuffer-proxy v0.0.2
-```
-
-After more commits on top of a tag, `git describe` automatically shows the distance: `v0.0.2-3-gabc1234` (3 commits after v0.0.2, at commit `abc1234`).
+The startup banner also prints the crate version dynamically.
 
 ## Tech Stack
 

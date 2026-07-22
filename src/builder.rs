@@ -1,5 +1,7 @@
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::net::TcpListener;
 
@@ -21,6 +23,7 @@ use crate::handler::{HttpHandler, HttpContext, RequestOrResponse, Body, NoopHand
 /// let proxy = ProxyBuilder::new()
 ///     .with_ca(ca)
 ///     .with_http_handler(logger)
+///     .with_enabled(true)
 ///     .build()?;
 /// proxy.run(bind_addr).await?;
 /// ```
@@ -31,6 +34,8 @@ pub struct ProxyBuilder {
     ws_handler: Option<Arc<dyn WebSocketHandler>>,
     request_buffer_size: usize,
     decompress: bool,
+    cert_dir: Option<PathBuf>,
+    enabled: Arc<AtomicBool>,
 }
 
 impl ProxyBuilder {
@@ -43,6 +48,8 @@ impl ProxyBuilder {
             ws_handler: None,
             request_buffer_size: 16384,
             decompress: true,
+            cert_dir: None,
+            enabled: Arc::new(AtomicBool::new(true)),
         }
     }
 
@@ -97,10 +104,39 @@ impl ProxyBuilder {
         self
     }
 
+    /// Enable or disable the proxy (enabled by default).
+    ///
+    /// When disabled, TLS interception is bypassed (`should_intercept_tls` returns `false`),
+    /// allowing CONNECT tunnels to pass through as raw TCP streams.
+    pub fn with_enabled(self, enabled: bool) -> Self {
+        self.enabled.store(enabled, Ordering::Relaxed);
+        self
+    }
+
+    /// Get a shared handle to the atomic enabled flag before building.
+    pub fn enabled_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.enabled)
+    }
+
+    /// Set a custom directory for CA certificate/key persistence.
+    ///
+    /// Defaults to `"cert"` when not set. Only used when no explicit CA
+    /// is provided via [`with_ca`](ProxyBuilder::with_ca).
+    pub fn with_cert_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.cert_dir = Some(dir.into());
+        self
+    }
+
     /// Consume the builder and produce a ready-to-start `Proxy`.
     /// Finalize the builder and produce a [`Proxy`] ready to run.
     pub fn build(self) -> Result<Proxy> {
-        let ca = self.ca.unwrap_or_else(CertificationAuthority::new);
+        let ca = self.ca.unwrap_or_else(|| {
+            if let Some(dir) = self.cert_dir {
+                CertificationAuthority::new_in(dir)
+            } else {
+                CertificationAuthority::new()
+            }
+        });
 
         let handler: Arc<dyn HttpHandler> = if self.handlers.is_empty() {
             Arc::new(NoopHandler)
@@ -110,13 +146,20 @@ impl ProxyBuilder {
             Arc::new(HandlerStack::new(self.handlers))
         };
 
+        let enabled_flag = self.enabled;
+        let wrapped_handler: Arc<dyn HttpHandler> = Arc::new(EnabledWrapperHandler {
+            inner: handler,
+            enabled: Arc::clone(&enabled_flag),
+        });
+
         Ok(Proxy {
             addr: self.addr,
             ca: Arc::new(ca),
-            handler,
+            handler: wrapped_handler,
             ws_handler: self.ws_handler,
             request_buffer_size: self.request_buffer_size,
             decompress: self.decompress,
+            enabled: enabled_flag,
         })
     }
 }
@@ -139,9 +182,35 @@ pub struct Proxy {
     ws_handler: Option<Arc<dyn WebSocketHandler>>,
     request_buffer_size: usize,
     decompress: bool,
+    enabled: Arc<AtomicBool>,
 }
 
 impl Proxy {
+    /// Returns whether the proxy is currently enabled.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled.load(Ordering::Relaxed)
+    }
+
+    /// Set whether the proxy is enabled.
+    pub fn set_enabled(&self, enabled: bool) {
+        self.enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    /// Enable the proxy.
+    pub fn enable(&self) {
+        self.set_enabled(true);
+    }
+
+    /// Disable the proxy.
+    pub fn disable(&self) {
+        self.set_enabled(false);
+    }
+
+    /// Get a shared handle to the atomic enabled flag.
+    pub fn enabled_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.enabled)
+    }
+
     /// Start the proxy — binds to the configured address and runs the accept loop.
     pub async fn start(self) -> Result<()> {
         let listener = TcpListener::bind(self.addr).await?;
@@ -165,6 +234,41 @@ impl Proxy {
                 }
             });
         }
+    }
+}
+
+// ── EnabledWrapperHandler ───────────────────────────────────────────
+
+/// Internal wrapper handler enforcing the Proxy enabled/disabled state.
+/// ponytail: wraps handler stack to bypass TLS interception when proxy is disabled
+struct EnabledWrapperHandler {
+    inner: Arc<dyn HttpHandler>,
+    enabled: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl HttpHandler for EnabledWrapperHandler {
+    async fn handle_request(
+        &self,
+        ctx: &mut HttpContext,
+        request: Request<Body>,
+    ) -> Result<RequestOrResponse> {
+        self.inner.handle_request(ctx, request).await
+    }
+
+    async fn handle_response(
+        &self,
+        ctx: &mut HttpContext,
+        response: Response<Body>,
+    ) -> Result<Response<Body>> {
+        self.inner.handle_response(ctx, response).await
+    }
+
+    async fn should_intercept_tls(&self, host: &str) -> bool {
+        if !self.enabled.load(Ordering::Relaxed) {
+            return false;
+        }
+        self.inner.should_intercept_tls(host).await
     }
 }
 
@@ -361,6 +465,71 @@ mod tests {
 
         assert_eq!(pa.addr, pb.addr);
         assert_eq!(pa.request_buffer_size, pb.request_buffer_size);
+    }
+
+    #[test]
+    fn test_builder_with_cert_dir() {
+        let dir = std::env::temp_dir().join("builder_ca_test");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let proxy = ProxyBuilder::new()
+            .with_cert_dir(&dir)
+            .build()
+            .unwrap();
+
+        let cert_path = dir.join("ca.pem");
+        let key_path = dir.join("ca-key.pem");
+
+        assert!(cert_path.exists(), "builder with_cert_dir should create ca.pem");
+        assert!(key_path.exists(), "builder with_cert_dir should create ca-key.pem");
+
+        // The proxy's CA should be functional
+        let (cert_der, _) = proxy.ca.forge_certificate("builder.example.com");
+        assert!(!cert_der.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_builder_explicit_ca_overrides_cert_dir() {
+        let dir = std::env::temp_dir().join("builder_override_test");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // An explicit CA created with a different directory
+        let explicit_ca = CertificationAuthority::new_in(&dir);
+        let forged_before = explicit_ca.forge_certificate("explicit.example.com").0;
+
+        let other_dir = std::env::temp_dir().join("builder_should_not_use");
+
+        let proxy = ProxyBuilder::new()
+            .with_ca(explicit_ca)
+            .with_cert_dir(&other_dir)
+            .build()
+            .unwrap();
+
+        // The explicit CA should still work and produce the same cached cert
+        let (forged_after, _) = proxy.ca.forge_certificate("explicit.example.com");
+        assert_eq!(forged_before, forged_after,
+            "explicit CA should be used, not one created from cert_dir");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&other_dir);
+    }
+
+    #[test]
+    fn test_builder_cert_dir_with_string() {
+        let dir = std::env::temp_dir().join("builder_string_test");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Test with &str (not PathBuf) via Into<PathBuf>
+        let _proxy = ProxyBuilder::new()
+            .with_cert_dir(dir.to_str().unwrap())
+            .build()
+            .unwrap();
+
+        assert!(dir.join("ca.pem").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ── HandlerStack ───────────────────────────────────────────────
@@ -567,5 +736,24 @@ mod tests {
             Body::Full(bytes) => assert_eq!(&bytes[..], b"data"),
             Body::Streaming(_) => panic!("expected Full"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_proxy_enable_disable_toggle() {
+        let proxy = ProxyBuilder::new()
+            .with_enabled(false)
+            .build()
+            .unwrap();
+
+        assert!(!proxy.is_enabled());
+        assert!(!proxy.handler.should_intercept_tls("example.com").await);
+
+        proxy.enable();
+        assert!(proxy.is_enabled());
+        assert!(proxy.handler.should_intercept_tls("example.com").await);
+
+        proxy.disable();
+        assert!(!proxy.is_enabled());
+        assert!(!proxy.handler.should_intercept_tls("example.com").await);
     }
 }

@@ -23,7 +23,6 @@ pub mod ca;
 pub mod error;
 pub mod handler;
 pub mod builder;
-pub mod version;
 
 // Optional application-level body decoder
 #[cfg(feature = "decoder")]
