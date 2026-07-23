@@ -35,6 +35,7 @@ static SERVICE_DECOMPRESS: LazyLock<Decompression<HyperClient>> = LazyLock::new(
         .with_webpki_roots()
         .https_or_http()
         .enable_http1()
+        .enable_http2()
         .build();
 
     let client = Client::builder(TokioExecutor::new())
@@ -56,6 +57,7 @@ static SERVICE_RAW: LazyLock<HyperClient> = LazyLock::new(|| {
         .with_webpki_roots()
         .https_or_http()
         .enable_http1()
+        .enable_http2()
         .build();
 
     Client::builder(TokioExecutor::new())

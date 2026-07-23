@@ -67,12 +67,13 @@ pub(crate) async fn handle_https(
     // ── Forge certificate ────────────────────────────────────────
     let (cert_der, key_der) = ca.forge_certificate(&target_host);
 
-    let server_config = ServerConfig::builder()
+    let mut server_config = ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(
             vec![CertificateDer::from(cert_der)],
             PrivateKeyDer::Pkcs8(key_der.into()),
         )?;
+    server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
     let acceptor = TlsAcceptor::from(Arc::new(server_config));
     let tls_client = acceptor.accept(client).await?;
