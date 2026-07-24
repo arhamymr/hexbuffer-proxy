@@ -1,6 +1,11 @@
-.PHONY: run build release check clean watch fmt lint test
+.PHONY: run build release check clean watch fmt lint test kill-port
 
-run:
+PORT := 8080
+
+kill-port:
+	@lsof -ti :$(PORT) | xargs kill -9 2>/dev/null; true
+
+run: kill-port
 	cargo run --example proxy
 
 build:
@@ -15,7 +20,7 @@ check:
 clean:
 	cargo clean
 
-watch:
+watch: kill-port
 	cargo watch -x "run --example proxy"
 
 test:

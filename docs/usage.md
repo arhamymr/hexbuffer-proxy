@@ -2,7 +2,7 @@
 
 ## Overview
 
-`hexbuffer-proxy` is a high-performance HTTPS MITM (Man-in-the-Middle) proxy library for Rust built on **Tokio**, **Hyper**, and **rustls**. It provides connection pooling, HTTP/2 upstream negotiation, transparent body decompression, WebSocket frame-level interception, and dynamic TLS certificate forging.
+`hexbuffer-proxy` is a high-performance HTTPS MITM (Man-in-the-Middle) proxy library for Rust built on **Tokio**, **Hyper**, and **rustls**. It provides connection pooling, WebSocket frame-level interception, and dynamic TLS certificate forging.
 
 ```toml
 [dependencies]
@@ -89,7 +89,6 @@ Builder for assembling and configuring a [`Proxy`].
 Creates a `ProxyBuilder` with default settings:
 - Bind address: `127.0.0.1:8080`
 - Request read buffer size: `16384` bytes (16 KB)
-- Transparent body decompression: `true`
 - Enabled state: `true`
 - Default CA directory: `"cert"`
 
@@ -110,9 +109,6 @@ Sets the WebSocket frame handler for inspecting and modifying WebSocket connecti
 
 ##### `pub fn with_request_buffer_size(mut self, size: usize) -> Self`
 Configures the per-request read buffer size in bytes (default: `16384`).
-
-##### `pub fn with_decompression(mut self, enabled: bool) -> Self`
-Enables or disables transparent body decompression for upstream responses via `tower-http` (gzip, deflate, brotli, zstd). Default is `true`.
 
 ##### `pub fn with_enabled(self, enabled: bool) -> Self`
 Sets the initial enabled state of the proxy (default: `true`). When set to `false`, TLS interception is bypassed (`should_intercept_tls` returns `false`), allowing CONNECT tunnels to pass through as raw TCP streams.
@@ -695,8 +691,7 @@ Client (Browser/App)
 │     ├─ Short-Circuit Response ──► Return to Client          │
 │     └─ Forward Request                                      │
 │                                                             │
-│  3. Upstream Connection (Hyper client pool, HTTP/2 ALPN)    │
-│     Transparent Body Decompression (gzip/br/deflate/zstd)   │
+│  3. Upstream Connection (Hyper client pool, HTTP/1.1)           │
 │                                                             │
 │  4. HTTP Response Pipeline (Reverse HttpHandler chain)      │
 │     Handler 3 ◄── Handler 2 ◄── Handler 1 (handle_response) │
@@ -705,6 +700,6 @@ Client (Browser/App)
 │     Frame Interception (on_frame, Direction::C2S / S2C)     │
 └─────────────────────────────────────────────────────────────┘
        │
-       ▼ [HTTP/1.1 or HTTP/2]
+       ▼ [HTTP/1.1]
 Upstream Server
 ```

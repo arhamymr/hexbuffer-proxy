@@ -25,7 +25,6 @@ pub(crate) async fn handle_http(
     client_addr: std::net::SocketAddr,
     buf_size: usize,
     request_str: String,
-    decompress: bool,
 ) -> anyhow::Result<()> {
     let request_bytes = request_str.as_bytes();
     let request = proxy::parse_raw_request(request_bytes)?;
@@ -102,7 +101,7 @@ pub(crate) async fn handle_http(
                     *req.uri_mut() = uri;
                 }
 
-                let response = crate::upstream::send_request(req, decompress).await?;
+                let response = crate::upstream::send_request(req).await?;
                 let modified_response = handler.handle_response(&mut ctx, response).await?;
 
                 // Write headers first, then stream body chunks

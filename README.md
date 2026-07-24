@@ -66,7 +66,7 @@ src/
 ├── http_proxy.rs  # Plain HTTP — forward proxy handler, host extraction, WS relay
 ├── https_proxy.rs # HTTPS MITM — TLS interception, cert forging, handler pipeline
 ├── ws_proxy.rs    # WebSocket — upgrade detection, bidirectional relay, frame handler
-├── upstream.rs    # Tower service stack — Hyper client + DecompressionLayer, HTTP/2 ALPN
+├── upstream.rs    # Hyper client with connection pooling, HTTP/1.1 only
 ├── handler.rs     # HttpHandler + WebSocketHandler traits, Body, HttpContext, Direction
 ├── builder.rs     # ProxyBuilder — ergonomic proxy configuration
 ├── decoder.rs     # App-layer body decoder — DecodeHandler plugin + encode/decode utilities
@@ -103,30 +103,17 @@ Preferences → Privacy & Security → Certificates → View Certificates → Au
 - ✅ **Clean module separation** — `http_proxy.rs` + `https_proxy.rs` + `ws_proxy.rs` + `upstream.rs`
 - ✅ **Streaming body support** — Content-Length, chunked transfer encoding, Connection: close
 - ✅ **WebSocket support** — upgrade detection, bidirectional relay, `WebSocketHandler` trait
-- ✅ **Upstream connection pooling** — Hyper client with `LazyLock`-shared pool, HTTP/2 ALPN
-- ✅ **Tower middleware decompression** — gzip, deflate, brotli, zstd via tower-http DecompressionLayer
+- ✅ **Upstream connection pooling** — Hyper client with `LazyLock`-shared pool, HTTP/1.1 only
 - ✅ Unit test coverage for builder, handler stack, and core modules
 - ✅ **Application-level body decoder** — `DecodeHandler` plugin + `decode_request`/`decode_response`/`encode_body` utilities
 
 ## Body Decoder (`decoder` feature)
 
 The `decoder` module provides application-level body decoding as an **opt-in plugin**.
-Unlike the transparent tower-http decompression in `upstream.rs` (which handles
-response bodies automatically), the decoder gives handlers explicit control over
-when and how to decode.
+Drop [`DecodeHandler`] into your handler chain when you need to inspect or modify
+compressed request/response bodies (gzip, deflate, brotli, zstd).
 
-### Relationship with tower-http
-
-| Direction | Tower (`decompress=true`) | DecodeHandler |
-|-----------|--------------------------|---------------|
-| Request   | Never touches            | Decodes gzip/deflate/brotli/zstd |
-| Response  | Decompresses automatically | Skips (header already stripped) |
-| Response  | Passes raw (`decompress=false`) | Decodes |
-
-### Usage — Tier 1 (Inspection)
-
-Add `DecodeHandler` to your chain. Tower stays on. Request bodies are decoded
-for downstream handlers; response bodies are already handled by tower.
+### Usage — Add to handler chain
 
 ```rust
 use hexbuffer_proxy::decoder::DecodeHandler;
@@ -134,27 +121,12 @@ use hexbuffer_proxy::decoder::DecodeHandler;
 let proxy = ProxyBuilder::new()
     .with_ca(ca)
     .with_http_handler(LoggingHandler::new())
-    .add_http_handler(DecodeHandler)           // ← decode request bodies
+    .add_http_handler(DecodeHandler)           // ← decode both directions
     .add_http_handler(MyInspectionHandler)     // ← sees plain bytes
     .build()?;
 ```
 
-### Usage — Tier 2 (Forensic)
-
-Disable tower, add `DecodeHandler`. Both directions decoded at the app layer.
-Add a wire-capture handler before DecodeHandler to snapshot raw bytes.
-
-```rust
-let proxy = ProxyBuilder::new()
-    .with_ca(ca)
-    .with_decompression(false)                 // tower off
-    .with_http_handler(WireCapture::new("/tmp/capture"))
-    .add_http_handler(DecodeHandler)           // decode both directions
-    .add_http_handler(MyInspector)
-    .build()?;
-```
-
-### Usage — Tier 3 (Repeater / Modifier)
+### Usage — Manual decode / encode (Repeater / Modifier)
 
 Use the free functions directly for fine-grained control:
 
@@ -222,7 +194,7 @@ The version is defined in `Cargo.toml` (`CARGO_PKG_VERSION`).
 **Check the version:**
 ```bash
 cargo run --example proxy -- --version
-# hexbuffer-proxy v0.0.1
+// hexbuffer-proxy v0.0.2
 
 # Or with -V
 cargo run --example proxy -- -V
@@ -239,13 +211,13 @@ The startup banner also prints the crate version dynamically.
 | `rcgen` | CA and per-domain certificate generation |
 | `webpki-roots` | Trusted root CA store for upstream connections |
 | `hyper` / `http` / `hyper-util` | HTTP types, parsing, connection pooling |
-| `hyper-rustls` | TLS connector for upstream Hyper client (ALPN, HTTP/2) |
+| `hyper-rustls` | TLS connector for upstream Hyper client (ALPN, HTTP/1.1) |
 | `async-trait` | Async trait dynamic dispatch |
 | `thiserror` | Ergonomic error types |
 | `bytes` | Zero-copy byte buffers |
 | `tokio-tungstenite` | WebSocket frame parsing and relay |
 | `futures-util` | Stream/Sink combinators for WebSocket frames |
-| `tower` / `tower-http` | Middleware stack — DecompressionLayer for transparent body decoding |
+| `tower` | Service trait for the upstream Hyper client |
 | `flate2` | Gzip/zlib codec — used by the `decoder` feature (opt-in) |
 | `brotli` | Brotli codec — used by the `decoder` feature (opt-in) |
 | `zstd` | Zstd codec — used by the `decoder` feature (opt-in) |

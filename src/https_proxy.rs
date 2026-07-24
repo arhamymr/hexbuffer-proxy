@@ -41,7 +41,6 @@ pub(crate) async fn handle_https(
     target: &str,
     client_addr: SocketAddr,
     _buf_size: usize,
-    decompress: bool,
 ) -> anyhow::Result<()> {
     let target_host = target
         .split(':')
@@ -73,7 +72,7 @@ pub(crate) async fn handle_https(
             vec![CertificateDer::from(cert_der)],
             PrivateKeyDer::Pkcs8(key_der.into()),
         )?;
-    server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    server_config.alpn_protocols = vec![b"http/1.1".to_vec()];
 
     let acceptor = TlsAcceptor::from(Arc::new(server_config));
     let tls_client = acceptor.accept(client).await?;
@@ -94,7 +93,7 @@ pub(crate) async fn handle_https(
                 let ws = ws.clone();
                 let tgt = tgt.clone();
                 async move {
-                    handle_https_request(req, handler, ws, &host, &tgt, client_addr, decompress).await
+                    handle_https_request(req, handler, ws, &host, &tgt, client_addr).await
                 }
             }
         }))
@@ -113,7 +112,6 @@ async fn handle_https_request(
     target_host: &str,
     _target: &str,
     client_addr: SocketAddr,
-    decompress: bool,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, anyhow::Error> {
     let req_id = proxy::REQUEST_ID.fetch_add(1, Ordering::SeqCst);
     let mut ctx = HttpContext {
@@ -150,12 +148,28 @@ async fn handle_https_request(
             }
 
             // ── Upstream ──────────────────────────────────────
-            let response = crate::upstream::send_request(req, decompress).await
-                .map_err(|e| anyhow::anyhow!("[#{}] upstream: {e}", req_id))?;
+            let response = match crate::upstream::send_request(req).await {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("[#{req_id}] upstream error: {e}");
+                    return Ok(Response::builder()
+                        .status(502)
+                        .body(Full::new(Bytes::from("Bad Gateway")).map_err(|e| match e {}).boxed())
+                        .unwrap());
+                }
+            };
 
             // ── Handler: response ─────────────────────────────
-            let modified = handler.handle_response(&mut ctx, response).await
-                .map_err(|e| anyhow::anyhow!("[#{}] response handler: {e}", req_id))?;
+            let modified = match handler.handle_response(&mut ctx, response).await {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("[#{req_id}] response handler error: {e}");
+                    return Ok(Response::builder()
+                        .status(502)
+                        .body(Full::new(Bytes::from("Bad Gateway")).map_err(|e| match e {}).boxed())
+                        .unwrap());
+                }
+            };
 
             let (parts, body) = modified.into_parts();
             Ok(Response::from_parts(parts, body.into_boxed()))

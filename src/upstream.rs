@@ -1,9 +1,6 @@
-// upstream.rs — shared Hyper client with connection pooling,
-// HTTP/2 ALPN negotiation, and optional transparent body
-// decompression via tower-http's DecompressionLayer middleware.
-//
-// Two LazyLock service stacks are cloned per request
-// (cheap — clones share the connection pool).
+// upstream.rs — shared Hyper client with connection pooling and
+// HTTP/1.1 ALPN negotiation. A single LazyLock client is cloned
+// per request (cheap — clones share the connection pool).
 
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -15,8 +12,6 @@ use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use tower::{Service, ServiceExt};
-use tower::Layer;
-use tower_http::decompression::{Decompression, DecompressionLayer};
 
 use crate::handler::Body;
 
@@ -27,37 +22,13 @@ type HyperClient = Client<
     BoxBody<Bytes, hyper::Error>,
 >;
 
-// ── Shared service stacks ───────────────────────────────────────
+// ── Shared client ────────────────────────────────────────────────
 
-/// Decompressing service — gzip, deflate, brotli, zstd stripped transparently.
-static SERVICE_DECOMPRESS: LazyLock<Decompression<HyperClient>> = LazyLock::new(|| {
+static CLIENT: LazyLock<HyperClient> = LazyLock::new(|| {
     let https = hyper_rustls::HttpsConnectorBuilder::new()
         .with_webpki_roots()
         .https_or_http()
         .enable_http1()
-        .enable_http2()
-        .build();
-
-    let client = Client::builder(TokioExecutor::new())
-        .pool_max_idle_per_host(20)
-        .pool_idle_timeout(Duration::from_secs(90))
-        .build(https);
-
-    DecompressionLayer::new()
-        .gzip(true)
-        .deflate(true)
-        .br(true)
-        .zstd(true)
-        .layer(client)
-});
-
-/// Raw pass-through service — no decompression applied.
-static SERVICE_RAW: LazyLock<HyperClient> = LazyLock::new(|| {
-    let https = hyper_rustls::HttpsConnectorBuilder::new()
-        .with_webpki_roots()
-        .https_or_http()
-        .enable_http1()
-        .enable_http2()
         .build();
 
     Client::builder(TokioExecutor::new())
@@ -76,29 +47,13 @@ fn body_to_hyper(body: Body) -> BoxBody<Bytes, hyper::Error> {
 // ── Public API ──────────────────────────────────────────────────
 
 /// Send an HTTP request upstream through the pooled Hyper client.
-///
-/// When `decompress` is true, gzip/deflate/brotli/zstd are decoded
-/// on the fly and the body is buffered for handler inspection.
-/// When false, raw bytes stream directly without buffering — ideal
-/// for caching proxies or large file passthrough.
-pub(crate) async fn send_request(req: Request<Body>, decompress: bool) -> anyhow::Result<Response<Body>> {
+/// Response body streams directly without buffering.
+pub(crate) async fn send_request(req: Request<Body>) -> anyhow::Result<Response<Body>> {
     let (parts, body) = req.into_parts();
     let hyper_req = Request::from_parts(parts, body_to_hyper(body));
 
-    if decompress {
-        let mut svc = SERVICE_DECOMPRESS.clone();
-        let resp = svc.ready().await?.call(hyper_req).await?;
-        let (parts, body) = resp.into_parts();
-        let bytes = body
-            .collect()
-            .await
-            .map_err(|e| anyhow::anyhow!("decompression failed: {e}"))?
-            .to_bytes();
-        Ok(Response::from_parts(parts, Body::Full(bytes)))
-    } else {
-        let mut svc = SERVICE_RAW.clone();
-        let resp = svc.ready().await?.call(hyper_req).await?;
-        let (parts, body) = resp.into_parts();
-        Ok(Response::from_parts(parts, Body::Streaming(body.boxed())))
-    }
+    let mut svc = CLIENT.clone();
+    let resp = svc.ready().await?.call(hyper_req).await?;
+    let (parts, body) = resp.into_parts();
+    Ok(Response::from_parts(parts, Body::Streaming(body.boxed())))
 }

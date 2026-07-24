@@ -221,8 +221,7 @@ async fn main() -> anyhow::Result<()> {
     eprintln!("║ Status:  {:<28}║", status_str);
     eprintln!("║ Listen:  127.0.0.1:8080              ║");
     eprintln!("║ TLS CA:  cert/ca.pem                 ║");
-    eprintln!("║ Upstream: Hyper (pooled, HTTP/2)     ║");
-    eprintln!("║ Decompress: tower-http (gzip/br/zstd)║");
+    eprintln!("║ Upstream: Hyper (pooled, HTTP/1.1)    ║");
     eprintln!("║ WS:       frame logger active        ║");
     eprintln!("╚══════════════════════════════════════╝");
     eprintln!();

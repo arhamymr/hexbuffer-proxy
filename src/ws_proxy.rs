@@ -167,11 +167,47 @@ pub(crate) async fn handle_https_websocket(
     }
     let client_res = response_builder.body(Full::new(Bytes::new()).map_err(|e| match e {}).boxed())?;
 
-    // 4. Spawn relay task — connects to upstream and relays frames
+    // 4. Build a clean upstream WebSocket request — only essential headers.
+    //    Stripping subprotocol/extensions from the cloned client request is fragile
+    //    (http 1.x HeaderMap &str lookup can miss), so we construct from scratch.
     let ctx_id = ctx.id;
     let ctx_host = ctx.host.clone();
-    let upgrade_req = req.map(|_| ()); // strip body for tokio_tungstenite
+    let target_host = target_host.to_string();
+    let path = req.uri().path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or("/")
+        .to_string();
+    // Keep Origin + Cookie for sites that need them (auth, CORS)
+    let origin = req.headers().get("origin")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let cookie = req.headers().get("cookie")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
     tokio::spawn(async move {
+        let upgrade_req = {
+            use tokio_tungstenite::tungstenite::handshake::client::generate_key;
+            let upstream_uri: http::Uri = format!("wss://{}{}", target_host, path)
+                .parse()
+                .expect("[ws] invalid upstream URI");
+            let mut builder = http::Request::builder()
+                .method("GET")
+                .uri(&upstream_uri)
+                .header("Host", &target_host)
+                .header("Upgrade", "websocket")
+                .header("Connection", "Upgrade")
+                .header("Sec-WebSocket-Version", "13")
+                .header("Sec-WebSocket-Key", generate_key());
+            if let Some(ref o) = origin {
+                builder = builder.header("Origin", o.as_str());
+            }
+            if let Some(ref c) = cookie {
+                builder = builder.header("Cookie", c.as_str());
+            }
+            builder.body(()).expect("[ws] build upstream request")
+        };
+        // (upgrade_req is now a clean request with no subprotocol —
+        //  tungstenite won't try to negotiate one upstream)
         match ws_fut.await {
             Ok(client_ws) => {
                 let connector = tokio_tungstenite::Connector::Rustls(Arc::new({

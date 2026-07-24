@@ -8,6 +8,7 @@ tokio = { version = "1.0", features = ["full"] }
 tokio-rustls = "0.26"
 rustls-pki-types = "1.0"
 rcgen = { version = "0.14", features = ["pem"] }
+time = "0.3"
 anyhow = "1.0"
 base64 = "0.22"
 webpki-roots = "1.0"
@@ -30,12 +31,11 @@ tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 hyper-tungstenite = "0.30"
 futures-util = "0.3"
 
-# Upstream Hyper client (connection pooling, HTTP/2, ALPN)
-hyper-rustls = { version = "0.27", features = ["http2", "webpki-roots", "native-tokio"] }
+# Upstream Hyper client (connection pooling, ALPN)
+hyper-rustls = { version = "0.27", features = ["webpki-roots", "native-tokio"] }
 
-# Tower middleware stack (decompression, future: retry, timeout, rate-limit)
+# Tower middleware (Service trait for Hyper client)
 tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.6", features = ["decompression-gzip", "decompression-deflate", "decompression-br", "decompression-zstd"] }
 
 # Application-level body decoder plugin (opt-in)
 flate2 = { version = "1", optional = true }

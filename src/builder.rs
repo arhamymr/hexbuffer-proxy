@@ -33,7 +33,6 @@ pub struct ProxyBuilder {
     handlers: Vec<Arc<dyn HttpHandler>>,
     ws_handler: Option<Arc<dyn WebSocketHandler>>,
     request_buffer_size: usize,
-    decompress: bool,
     cert_dir: Option<PathBuf>,
     enabled: Arc<AtomicBool>,
 }
@@ -47,7 +46,6 @@ impl ProxyBuilder {
             handlers: Vec::new(),
             ws_handler: None,
             request_buffer_size: 16384,
-            decompress: true,
             cert_dir: None,
             enabled: Arc::new(AtomicBool::new(true)),
         }
@@ -91,16 +89,6 @@ impl ProxyBuilder {
     /// Per-request read buffer size in bytes.
     pub fn with_request_buffer_size(mut self, size: usize) -> Self {
         self.request_buffer_size = size;
-        self
-    }
-
-    /// Enable or disable transparent body decompression (gzip, deflate, brotli, zstd).
-    ///
-    /// When enabled (default), upstream response bodies are automatically
-    /// decompressed before reaching the handler. When disabled, raw compressed
-    /// bytes pass through untouched — useful for caching proxies or forensics.
-    pub fn with_decompression(mut self, enabled: bool) -> Self {
-        self.decompress = enabled;
         self
     }
 
@@ -158,7 +146,6 @@ impl ProxyBuilder {
             handler: wrapped_handler,
             ws_handler: self.ws_handler,
             request_buffer_size: self.request_buffer_size,
-            decompress: self.decompress,
             enabled: enabled_flag,
         })
     }
@@ -181,7 +168,6 @@ pub struct Proxy {
     handler: Arc<dyn HttpHandler>,
     ws_handler: Option<Arc<dyn WebSocketHandler>>,
     request_buffer_size: usize,
-    decompress: bool,
     enabled: Arc<AtomicBool>,
 }
 
@@ -220,7 +206,6 @@ impl Proxy {
         let handler = self.handler;
         let ws_handler = self.ws_handler;
         let buf_size = self.request_buffer_size;
-        let decompress = self.decompress;
 
         loop {
             let (stream, addr) = listener.accept().await?;
@@ -229,7 +214,7 @@ impl Proxy {
             let ws_handler = ws_handler.clone();
 
             tokio::spawn(async move {
-                if let Err(e) = crate::proxy::handle_client(stream, ca, handler, ws_handler, buf_size, decompress).await {
+                if let Err(e) = crate::proxy::handle_client(stream, ca, handler, ws_handler, buf_size).await {
                     eprintln!("[{}] error: {}", addr, e);
                 }
             });
